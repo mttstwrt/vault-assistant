@@ -30,4 +30,12 @@ export default tseslint.config(
 		},
 	},
 	...obsidianmd.configs.recommended,
+	{
+		rules: {
+			// This rule mangles technical strings (e.g. it wants to capitalise
+			// "http://" into "HTTP://"), so it is unreliable for settings copy
+			// that contains URLs and example paths.
+			'obsidianmd/ui/sentence-case': 'off',
+		},
+	},
 );
