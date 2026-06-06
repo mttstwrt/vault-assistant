@@ -1,9 +1,9 @@
 import { App, TFile, TFolder, moment, normalizePath } from 'obsidian';
-import { AIChatSettings } from './settings';
+import { VaultAssistantSettings } from './settings';
 import { ChatMessage } from './types';
 
 /** Build a stable file path for a new conversation from its first message. */
-export function newConversationPath(settings: AIChatSettings, firstMessage: string): string {
+export function newConversationPath(settings: VaultAssistantSettings, firstMessage: string): string {
 	const stamp = moment().format('YYYY-MM-DD HHmm');
 	const slug = firstMessage
 		.replace(/[\\/:*?"<>|#^[\]\n]/g, ' ')
@@ -58,7 +58,7 @@ async function ensureFolder(app: App, folder: string): Promise<void> {
 /** Write (or overwrite) the conversation transcript at `path`. */
 export async function saveConversation(
 	app: App,
-	settings: AIChatSettings,
+	settings: VaultAssistantSettings,
 	path: string,
 	messages: ChatMessage[],
 ): Promise<void> {

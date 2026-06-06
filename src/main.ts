@@ -1,16 +1,16 @@
 import { Plugin, WorkspaceLeaf } from 'obsidian';
-import { AIChatSettings, AIChatSettingTab, DEFAULT_SETTINGS } from './settings';
+import { VaultAssistantSettings, VaultAssistantSettingTab, DEFAULT_SETTINGS } from './settings';
 import { ChatView, VIEW_TYPE_CHAT } from './ui/chat-view';
 
-export default class AIVaultChatPlugin extends Plugin {
-	settings!: AIChatSettings;
+export default class VaultAssistantPlugin extends Plugin {
+	settings!: VaultAssistantSettings;
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
 
 		this.registerView(VIEW_TYPE_CHAT, (leaf: WorkspaceLeaf) => new ChatView(leaf, this));
 
-		this.addRibbonIcon('bot', 'AI vault chat', () => void this.activateView());
+		this.addRibbonIcon('bot', 'Vault assistant', () => void this.activateView());
 
 		this.addCommand({
 			id: 'open-chat',
@@ -18,7 +18,7 @@ export default class AIVaultChatPlugin extends Plugin {
 			callback: () => void this.activateView(),
 		});
 
-		this.addSettingTab(new AIChatSettingTab(this.app, this));
+		this.addSettingTab(new VaultAssistantSettingTab(this.app, this));
 	}
 
 	async activateView(): Promise<void> {
@@ -35,7 +35,7 @@ export default class AIVaultChatPlugin extends Plugin {
 		this.settings = Object.assign(
 			{},
 			DEFAULT_SETTINGS,
-			(await this.loadData()) as Partial<AIChatSettings>,
+			(await this.loadData()) as Partial<VaultAssistantSettings>,
 		);
 	}
 

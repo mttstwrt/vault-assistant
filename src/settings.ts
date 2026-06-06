@@ -1,7 +1,7 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
-import type AIVaultChatPlugin from './main';
+import type VaultAssistantPlugin from './main';
 
-export interface AIChatSettings {
+export interface VaultAssistantSettings {
 	// --- Model endpoint ---
 	baseUrl: string;
 	apiKey: string;
@@ -19,18 +19,23 @@ export interface AIChatSettings {
 	conversationsFolder: string;
 	wikiFolder: string;
 	autoSaveConversations: boolean;
+
+	// --- Operating memory ---
+	useMemory: boolean;
+	memoryFile: string;
 }
 
 export const DEFAULT_SYSTEM_PROMPT = `You are an AI assistant embedded inside the user's Obsidian vault. You can read, search, and (only within permitted folders) write notes using the provided tools, the same way a coding agent works inside a code repository.
 
 Guidelines:
 - Treat the user's personal notes as READ-ONLY context. Never modify a note unless the user explicitly asks you to edit that specific file, and only if it is in a writable folder.
-- When you learn or synthesise something worth keeping, save it to the wiki. First call list_wiki to see what already exists, then either extend an existing page (update_wiki with mode "append") or add a new one, so the wiki grows coherently instead of duplicating pages.
+- Your "Operating memory" (shown below, if present) is what you already know about how THIS vault is organised — where data lives, the formats and conventions the user uses, and corrections they have given you. Trust it and act on it before exploring. When you learn a durable fact like this, or the user corrects you (e.g. "habits are tracked here now, not there"), save it with the remember tool so you don't relearn it next time. Keep that memory short and high-signal; prefer correcting/replacing stale entries over piling on duplicates.
+- When you learn or synthesise something worth keeping, save it to the wiki. First call list_wiki to see what already exists, then either extend an existing page (update_wiki with mode "append") or add a new one, so the wiki grows coherently instead of duplicating pages. (Memory = how the vault works; wiki = what's in it.)
 - Connect wiki notes to each other and to the user's existing notes and past conversations using [[wikilinks]]. Use the links tool to discover how a note already connects before linking.
 - Prefer searching and reading the vault before answering, so your responses are grounded in the user's actual notes.
 - Be concise and direct. Do the work; don't narrate every step.`;
 
-export const DEFAULT_SETTINGS: AIChatSettings = {
+export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	baseUrl: 'http://localhost:11434/v1',
 	apiKey: '',
 	model: 'llama3.1',
@@ -43,6 +48,8 @@ export const DEFAULT_SETTINGS: AIChatSettings = {
 	conversationsFolder: 'AI/Conversations',
 	wikiFolder: 'AI/Wiki',
 	autoSaveConversations: true,
+	useMemory: true,
+	memoryFile: 'AI/Memory.md',
 };
 
 /** Parse a textarea of newline/comma-separated folders into a clean list. */
@@ -53,10 +60,10 @@ function parseFolders(value: string): string[] {
 		.filter(Boolean);
 }
 
-export class AIChatSettingTab extends PluginSettingTab {
-	plugin: AIVaultChatPlugin;
+export class VaultAssistantSettingTab extends PluginSettingTab {
+	plugin: VaultAssistantPlugin;
 
-	constructor(app: App, plugin: AIVaultChatPlugin) {
+	constructor(app: App, plugin: VaultAssistantPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
@@ -150,7 +157,7 @@ export class AIChatSettingTab extends PluginSettingTab {
 					.addOption('allowlist', 'Only allowed folders')
 					.setValue(s.readScope)
 					.onChange(async (v) => {
-						s.readScope = v as AIChatSettings['readScope'];
+						s.readScope = v as VaultAssistantSettings['readScope'];
 						await this.save();
 						this.display();
 					}),
@@ -220,6 +227,38 @@ export class AIChatSettingTab extends PluginSettingTab {
 				}),
 			);
 
+		new Setting(containerEl).setName('Operating memory').setHeading();
+
+		new Setting(containerEl)
+			.setName('Use operating memory')
+			.setDesc(
+				'Inject a small, curated memory file into the agent at the start of every conversation, and let it record durable facts (where data lives, your formats, corrections) with the remember tool. This is how it avoids relearning your vault each time.',
+			)
+			.addToggle((t) =>
+				t.setValue(s.useMemory).onChange(async (v) => {
+					s.useMemory = v;
+					await this.save();
+					this.display();
+				}),
+			);
+
+		if (s.useMemory) {
+			new Setting(containerEl)
+				.setName('Memory file')
+				.setDesc(
+					'Path to the operating-memory note. Always readable and writable. Loaded in full each session, so keep it concise.',
+				)
+				.addText((t) =>
+					t
+						.setPlaceholder('AI/Memory.md')
+						.setValue(s.memoryFile)
+						.onChange(async (v) => {
+							s.memoryFile = v.trim();
+							await this.save();
+						}),
+				);
+		}
+
 		new Setting(containerEl).setName('Agent prompt').setHeading();
 
 		new Setting(containerEl)
@@ -229,7 +268,7 @@ export class AIChatSettingTab extends PluginSettingTab {
 			)
 			.addTextArea((t) => {
 				t.inputEl.rows = 8;
-				t.inputEl.addClass('avc-wide-textarea');
+				t.inputEl.addClass('va-wide-textarea');
 				t.setValue(s.systemPrompt).onChange(async (v) => {
 					s.systemPrompt = v;
 					await this.save();

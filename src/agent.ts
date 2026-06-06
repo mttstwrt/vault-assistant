@@ -1,5 +1,5 @@
 import { App } from 'obsidian';
-import { AIChatSettings } from './settings';
+import { VaultAssistantSettings } from './settings';
 import { ChatMessage, ToolCall } from './types';
 import { chatCompletion } from './api/client';
 import { TOOL_SPECS, executeTool } from './tools/vault-tools';
@@ -18,7 +18,7 @@ export interface AgentEvents {
  */
 export async function runAgent(
 	app: App,
-	settings: AIChatSettings,
+	settings: VaultAssistantSettings,
 	history: ChatMessage[],
 	events: AgentEvents,
 ): Promise<ChatMessage[]> {

@@ -1,5 +1,5 @@
 import { App, TFile, normalizePath } from 'obsidian';
-import { AIChatSettings } from '../settings';
+import { VaultAssistantSettings } from '../settings';
 import { isReadable } from '../permissions';
 
 /** True when `path` sits inside (or equals) `folder`. */
@@ -29,7 +29,7 @@ function buildBacklinks(app: App): Record<string, string[]> {
  * notes (anywhere in the vault, including past conversations) that link to it.
  * Lets the agent extend and cross-link the wiki coherently across sessions.
  */
-export function buildWikiIndex(app: App, settings: AIChatSettings): string {
+export function buildWikiIndex(app: App, settings: VaultAssistantSettings): string {
 	const files = app.vault
 		.getMarkdownFiles()
 		.filter((f) => inFolder(f.path, settings.wikiFolder))
@@ -53,7 +53,7 @@ export function buildWikiIndex(app: App, settings: AIChatSettings): string {
 }
 
 /** Outgoing links, backlinks, and broken links for a single note. */
-export function describeLinks(app: App, settings: AIChatSettings, path: string): string {
+export function describeLinks(app: App, settings: VaultAssistantSettings, path: string): string {
 	const p = normalizePath(path);
 	const f = app.vault.getAbstractFileByPath(p);
 	if (!(f instanceof TFile)) return `Error: file not found: "${p}".`;

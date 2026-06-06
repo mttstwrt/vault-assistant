@@ -1,6 +1,6 @@
 {
-	"id": "ai-vault-chat",
-	"name": "AI vault chat",
+	"id": "vault-assistant",
+	"name": "Vault assistant",
 	"version": "0.1.0",
 	"minAppVersion": "1.7.2",
 	"description": "Minimalist AI chat that can read and write your vault like a coding agent, with folder-scoped permissions, auto-saved conversations, and a growing interlinked wiki.",

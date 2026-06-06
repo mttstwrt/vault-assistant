@@ -1,6 +1,6 @@
 import { requestUrl } from 'obsidian';
 import { ChatMessage, ToolCall, ToolSpec } from '../types';
-import { AIChatSettings } from '../settings';
+import { VaultAssistantSettings } from '../settings';
 
 interface ApiToolCall {
 	id: string;
@@ -48,7 +48,7 @@ export interface LLMResult {
  * Uses Obsidian's requestUrl so it works on mobile and bypasses CORS.
  */
 export async function chatCompletion(
-	settings: AIChatSettings,
+	settings: VaultAssistantSettings,
 	messages: ChatMessage[],
 	tools: ToolSpec[],
 ): Promise<LLMResult> {

@@ -1,5 +1,5 @@
 import { App, TFile, TFolder, normalizePath } from 'obsidian';
-import { AIChatSettings } from '../settings';
+import { VaultAssistantSettings } from '../settings';
 import { ToolSpec } from '../types';
 import { displayScopes, isReadable, isWritable, writeScopes } from '../permissions';
 import { buildWikiIndex, describeLinks } from './graph';
@@ -70,6 +70,28 @@ export const TOOL_SPECS: ToolSpec[] = [
 		},
 	},
 	{
+		name: 'remember',
+		description:
+			"Save a durable fact to your operating memory — something you should know at the START of every future conversation: where data lives, the formats/conventions the user uses, and corrections (e.g. \"habits are tracked in Trackers/2026.base now, not the old Habits/ folder\"). This memory file is injected into your context automatically each session, so keep it short and high-signal. Prefer mode 'replace' with a cleaned-up full version to dedupe and fix stale entries; use 'append' to quickly add one new fact. This is for HOW the vault works — use update_wiki for WHAT is in it.",
+		parameters: {
+			type: 'object',
+			properties: {
+				content: {
+					type: 'string',
+					description:
+						"The memory text: a single fact (for 'append') or the full curated memory file (for 'replace').",
+				},
+				mode: {
+					type: 'string',
+					enum: ['append', 'replace'],
+					description:
+						"'append' (default) adds to the end of the memory file; 'replace' overwrites it entirely with a curated version.",
+				},
+			},
+			required: ['content'],
+		},
+	},
+	{
 		name: 'list_wiki',
 		description:
 			'List every existing wiki note and how it links to other notes and the rest of the vault. Call this before creating or updating wiki notes so the wiki grows coherently: extend and cross-link existing pages instead of duplicating them.',
@@ -126,7 +148,7 @@ async function ensureFolder(app: App, folder: string): Promise<void> {
 
 async function writeFile(
 	app: App,
-	settings: AIChatSettings,
+	settings: VaultAssistantSettings,
 	path: string,
 	content: string,
 ): Promise<string> {
@@ -161,7 +183,7 @@ function sanitizeTitle(title: string): string {
 /** Run a tool by name and return a string result for the model. */
 export async function executeTool(
 	app: App,
-	settings: AIChatSettings,
+	settings: VaultAssistantSettings,
 	name: string,
 	argsJson: string,
 ): Promise<string> {
@@ -230,6 +252,27 @@ export async function executeTool(
 					return `Appended to ${p}`;
 				}
 				return await writeFile(app, settings, p, str(args.content));
+			}
+
+			case 'remember': {
+				if (!settings.useMemory) {
+					return 'Error: operating memory is disabled in settings.';
+				}
+				const path = normalizePath(settings.memoryFile);
+				if (!path) return 'Error: no memory file is configured.';
+				const content = str(args.content);
+				if (!content.trim()) return 'Error: memory content is required.';
+				const existing = app.vault.getAbstractFileByPath(path);
+				if (str(args.mode) !== 'replace' && existing instanceof TFile) {
+					if (!isWritable(path, settings)) {
+						return `Error: writing to "${path}" is not permitted.`;
+					}
+					const cur = await app.vault.read(existing);
+					await app.vault.modify(existing, `${cur.trimEnd()}\n\n${content}`);
+					return `Remembered (appended to ${path}).`;
+				}
+				await writeFile(app, settings, path, content);
+				return `Remembered (saved ${path}).`;
 			}
 
 			case 'list_wiki':

@@ -1,8 +1,8 @@
 {
-	"name": "ai-vault-chat",
+	"name": "vault-assistant",
 	"version": "0.1.0",
 	"description": "Minimalist AI chat agent for your Obsidian vault.",
-	"main": "main.js",
+	"main": "dist/main.js",
 	"type": "module",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",

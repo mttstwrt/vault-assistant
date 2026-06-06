@@ -1,14 +1,14 @@
 import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon } from 'obsidian';
-import type AIVaultChatPlugin from '../main';
+import type VaultAssistantPlugin from '../main';
 import { ChatMessage, ToolCall } from '../types';
 import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
 import { newConversationPath, saveConversation } from '../conversation';
 
-export const VIEW_TYPE_CHAT = 'ai-vault-chat-view';
+export const VIEW_TYPE_CHAT = 'vault-assistant-view';
 
 export class ChatView extends ItemView {
-	private plugin: AIVaultChatPlugin;
+	private plugin: VaultAssistantPlugin;
 	private history: ChatMessage[] = [];
 	private conversationPath: string | null = null;
 	private busy = false;
@@ -18,7 +18,7 @@ export class ChatView extends ItemView {
 	private sendBtn!: HTMLButtonElement;
 	private toolEls = new Map<string, HTMLElement>();
 
-	constructor(leaf: WorkspaceLeaf, plugin: AIVaultChatPlugin) {
+	constructor(leaf: WorkspaceLeaf, plugin: VaultAssistantPlugin) {
 		super(leaf);
 		this.plugin = plugin;
 	}
@@ -28,7 +28,7 @@ export class ChatView extends ItemView {
 	}
 
 	getDisplayText(): string {
-		return 'AI vault chat';
+		return 'Vault assistant';
 	}
 
 	getIcon(): string {
@@ -38,22 +38,22 @@ export class ChatView extends ItemView {
 	async onOpen(): Promise<void> {
 		const root = this.contentEl;
 		root.empty();
-		root.addClass('ai-vault-chat');
+		root.addClass('vault-assistant');
 
-		const header = root.createDiv({ cls: 'avc-header' });
-		header.createEl('span', { text: 'AI vault chat', cls: 'avc-title' });
-		const newBtn = header.createEl('button', { cls: 'avc-new', attr: { 'aria-label': 'New chat' } });
+		const header = root.createDiv({ cls: 'va-header' });
+		header.createEl('span', { text: 'Vault assistant', cls: 'va-title' });
+		const newBtn = header.createEl('button', { cls: 'va-new', attr: { 'aria-label': 'New chat' } });
 		setIcon(newBtn, 'plus');
-		newBtn.onclick = () => this.resetConversation();
+		newBtn.onclick = () => void this.resetConversation();
 
-		this.messagesEl = root.createDiv({ cls: 'avc-messages' });
+		this.messagesEl = root.createDiv({ cls: 'va-messages' });
 
-		const inputRow = root.createDiv({ cls: 'avc-input-row' });
+		const inputRow = root.createDiv({ cls: 'va-input-row' });
 		this.inputEl = inputRow.createEl('textarea', {
-			cls: 'avc-input',
+			cls: 'va-input',
 			attr: { rows: '2', placeholder: 'Ask about your vault…  (Enter to send, Shift+Enter for newline)' },
 		});
-		this.sendBtn = inputRow.createEl('button', { cls: 'avc-send', text: 'Send' });
+		this.sendBtn = inputRow.createEl('button', { cls: 'va-send', text: 'Send' });
 
 		this.sendBtn.onclick = () => void this.send();
 		this.inputEl.addEventListener('keydown', (evt) => {
@@ -63,15 +63,16 @@ export class ChatView extends ItemView {
 			}
 		});
 
-		this.resetConversation();
+		await this.resetConversation();
 	}
 
 	async onClose(): Promise<void> {
 		this.toolEls.clear();
 	}
 
-	private resetConversation(): void {
-		this.history = [{ role: 'system', content: buildSystemPrompt(this.plugin.settings) }];
+	private async resetConversation(): Promise<void> {
+		const systemPrompt = await buildSystemPrompt(this.app, this.plugin.settings);
+		this.history = [{ role: 'system', content: systemPrompt }];
 		this.conversationPath = null;
 		this.toolEls.clear();
 		this.messagesEl.empty();
@@ -83,30 +84,30 @@ export class ChatView extends ItemView {
 	}
 
 	private addInfo(text: string): void {
-		this.messagesEl.createDiv({ cls: 'avc-info', text });
+		this.messagesEl.createDiv({ cls: 'va-info', text });
 	}
 
 	private addUserBubble(text: string): void {
-		const bubble = this.messagesEl.createDiv({ cls: 'avc-msg avc-user' });
-		bubble.createDiv({ cls: 'avc-role', text: 'You' });
-		bubble.createDiv({ cls: 'avc-content', text });
+		const bubble = this.messagesEl.createDiv({ cls: 'va-msg va-user' });
+		bubble.createDiv({ cls: 'va-role', text: 'You' });
+		bubble.createDiv({ cls: 'va-content', text });
 		this.scrollToBottom();
 	}
 
 	private async addAssistantBubble(markdown: string): Promise<void> {
-		const bubble = this.messagesEl.createDiv({ cls: 'avc-msg avc-assistant' });
-		bubble.createDiv({ cls: 'avc-role', text: 'Assistant' });
-		const content = bubble.createDiv({ cls: 'avc-content' });
+		const bubble = this.messagesEl.createDiv({ cls: 'va-msg va-assistant' });
+		bubble.createDiv({ cls: 'va-role', text: 'Assistant' });
+		const content = bubble.createDiv({ cls: 'va-content' });
 		await MarkdownRenderer.render(this.app, markdown, content, '', this);
 		this.scrollToBottom();
 	}
 
 	private addToolCall(call: ToolCall): void {
-		const details = this.messagesEl.createEl('details', { cls: 'avc-tool' });
+		const details = this.messagesEl.createEl('details', { cls: 'va-tool' });
 		const summary = details.createEl('summary');
-		setIcon(summary.createSpan({ cls: 'avc-tool-icon' }), 'wrench');
+		setIcon(summary.createSpan({ cls: 'va-tool-icon' }), 'wrench');
 		summary.createSpan({ text: ` ${call.name}` });
-		details.createEl('pre', { cls: 'avc-tool-args', text: call.arguments });
+		details.createEl('pre', { cls: 'va-tool-args', text: call.arguments });
 		this.toolEls.set(call.id, details);
 		this.scrollToBottom();
 	}
@@ -115,12 +116,12 @@ export class ChatView extends ItemView {
 		const details = this.toolEls.get(call.id);
 		if (!details) return;
 		const trimmed = result.length > 2000 ? result.slice(0, 2000) + '\n…(truncated)' : result;
-		details.createEl('pre', { cls: 'avc-tool-result', text: trimmed });
+		details.createEl('pre', { cls: 'va-tool-result', text: trimmed });
 		this.scrollToBottom();
 	}
 
 	private addError(message: string): void {
-		this.messagesEl.createDiv({ cls: 'avc-error', text: `⚠️ ${message}` });
+		this.messagesEl.createDiv({ cls: 'va-error', text: `⚠️ ${message}` });
 		this.scrollToBottom();
 	}
 
@@ -144,7 +145,7 @@ export class ChatView extends ItemView {
 		}
 
 		this.setBusy(true);
-		const thinking = this.messagesEl.createDiv({ cls: 'avc-info avc-thinking', text: 'Thinking…' });
+		const thinking = this.messagesEl.createDiv({ cls: 'va-info va-thinking', text: 'Thinking…' });
 		this.scrollToBottom();
 
 		await runAgent(this.app, this.plugin.settings, this.history, {

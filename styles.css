@@ -1,13 +1,13 @@
-/* AI vault chat — minimalist chat panel */
+/* Vault assistant — minimalist chat panel */
 
-.ai-vault-chat {
+.vault-assistant {
 	display: flex;
 	flex-direction: column;
 	height: 100%;
 	padding: 0;
 }
 
-.avc-header {
+.va-header {
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
@@ -15,13 +15,13 @@
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
-.avc-title {
+.va-title {
 	font-weight: 600;
 	font-size: var(--font-ui-small);
 	color: var(--text-muted);
 }
 
-.avc-new {
+.va-new {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
@@ -31,11 +31,11 @@
 	cursor: pointer;
 	color: var(--text-muted);
 }
-.avc-new:hover {
+.va-new:hover {
 	color: var(--text-normal);
 }
 
-.avc-messages {
+.va-messages {
 	flex: 1 1 auto;
 	overflow-y: auto;
 	padding: 12px;
@@ -44,54 +44,54 @@
 	gap: 10px;
 }
 
-.avc-msg {
+.va-msg {
 	display: flex;
 	flex-direction: column;
 	gap: 4px;
 }
 
-.avc-role {
+.va-role {
 	font-size: var(--font-ui-smaller);
 	text-transform: uppercase;
 	letter-spacing: 0.04em;
 	color: var(--text-faint);
 }
 
-.avc-content {
+.va-content {
 	border-radius: 8px;
 	padding: 8px 10px;
 	font-size: var(--font-ui-small);
 	line-height: 1.5;
 	word-break: break-word;
 }
-.avc-content > :first-child {
+.va-content > :first-child {
 	margin-top: 0;
 }
-.avc-content > :last-child {
+.va-content > :last-child {
 	margin-bottom: 0;
 }
 
-.avc-user .avc-content {
+.va-user .va-content {
 	background: var(--background-modifier-hover);
 	white-space: pre-wrap;
 }
 
-.avc-assistant .avc-content {
+.va-assistant .va-content {
 	background: var(--background-secondary);
 }
 
-.avc-info {
+.va-info {
 	font-size: var(--font-ui-smaller);
 	color: var(--text-faint);
 	text-align: center;
 	padding: 2px 0;
 }
 
-.avc-thinking {
+.va-thinking {
 	font-style: italic;
 }
 
-.avc-error {
+.va-error {
 	font-size: var(--font-ui-small);
 	color: var(--text-error);
 	background: var(--background-modifier-error);
@@ -99,26 +99,26 @@
 	padding: 8px 10px;
 }
 
-.avc-tool {
+.va-tool {
 	font-size: var(--font-ui-smaller);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 8px;
 	padding: 4px 8px;
 	color: var(--text-muted);
 }
-.avc-tool summary {
+.va-tool summary {
 	cursor: pointer;
 	list-style: none;
 	display: flex;
 	align-items: center;
 	gap: 2px;
 }
-.avc-tool-icon {
+.va-tool-icon {
 	display: inline-flex;
 	vertical-align: middle;
 }
-.avc-tool-args,
-.avc-tool-result {
+.va-tool-args,
+.va-tool-result {
 	margin: 6px 0 2px;
 	padding: 6px;
 	background: var(--background-primary-alt);
@@ -130,14 +130,14 @@
 	overflow: auto;
 }
 
-.avc-input-row {
+.va-input-row {
 	display: flex;
 	gap: 6px;
 	padding: 8px;
 	border-top: 1px solid var(--background-modifier-border);
 }
 
-.avc-input {
+.va-input {
 	flex: 1 1 auto;
 	resize: vertical;
 	min-height: 2.4em;
@@ -145,15 +145,15 @@
 	font-size: var(--font-ui-small);
 }
 
-.avc-send {
+.va-send {
 	align-self: flex-end;
 	cursor: pointer;
 }
-.avc-send:disabled {
+.va-send:disabled {
 	opacity: 0.6;
 	cursor: default;
 }
 
-.avc-wide-textarea {
+.va-wide-textarea {
 	width: 100%;
 }

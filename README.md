@@ -1,4 +1,4 @@
-# AI vault chat
+# Vault assistant
 
 A minimalist AI chat panel for [Obsidian](https://obsidian.md) that gives a language model access to your vault the way a coding agent (Claude Code, opencode) sees a repository — it can list, search, read, and (only where you allow it) write notes.
 
@@ -6,16 +6,18 @@ It works with any **OpenAI-compatible** endpoint: local runners like **Ollama** 
 
 ## Features
 
-- **Chat side panel** — open from the ribbon (bot icon) or the command **AI vault chat: Open chat**.
+- **Chat side panel** — open from the ribbon (bot icon) or the command **Vault assistant: Open chat**.
 - **Vault-aware agent** — the model is given tools to explore your notes and ground its answers in them:
   - `list_files`, `read_file`, `search`
   - `links` — outgoing links and backlinks for any note
   - `write_file`, `append_file` (writable folders only)
   - `list_wiki` — the existing wiki graph (notes + how they interlink)
   - `update_wiki` — create or expand an interlinked wiki note
-- **Folder-scoped permissions** — decide exactly what the agent may read and write. By default it can read everything but write **nothing** except the conversations and wiki folders, so your own notes stay untouched.
+  - `remember` — save a durable fact to the agent's operating memory
+- **Folder-scoped permissions** — decide exactly what the agent may read and write. By default it can read everything but write **nothing** except the conversations, wiki, and memory files, so your own notes stay untouched.
 - **Auto-saved conversations** — every chat is written to your conversations folder as a markdown note.
 - **Growing wiki** — the agent saves synthesised knowledge to a wiki folder using `[[wikilinks]]`, so a connected second brain builds up as you talk.
+- **Operating memory** — a small, curated note (`AI/Memory.md` by default) injected into the agent at the start of every conversation. When you correct it ("habits live here now, not there") it records the fact with `remember`, so it stops relearning how your vault is organised. The wiki holds *what's in* your vault; memory holds *how it works*.
 
 ## Settings
 
@@ -39,7 +41,14 @@ It works with any **OpenAI-compatible** endpoint: local runners like **Ollama** 
 | Wiki folder | Where the generated wiki lives (always writable). Default `AI/Wiki`. |
 | Auto-save conversations | Save each chat as you go. |
 
-The conversations and wiki folders are always writable; everything else is read-only unless you add it to **Writable folders**.
+**Operating memory**
+
+| Setting | Description |
+| --- | --- |
+| Use operating memory | Inject the memory file each session and expose the `remember` tool. |
+| Memory file | Path to the curated memory note (always readable/writable). Default `AI/Memory.md`. Loaded in full each session, so keep it concise. |
+
+The conversations and wiki folders and the memory file are always writable; everything else is read-only unless you add it to **Writable folders**.
 
 ## A note on privacy
 
@@ -54,7 +63,11 @@ npm run build    # type-check + production bundle
 npm run lint
 ```
 
-To test in a vault, copy `main.js`, `manifest.json`, and `styles.css` into
-`<Vault>/.obsidian/plugins/ai-vault-chat/` and enable the plugin under
-**Settings → Community plugins**. (For local development the plugin folder name
-should match the `id` in `manifest.json`.)
+Both `npm run dev` and `npm run build` write the bundle to `dist/`, alongside
+copies of `manifest.json` and `styles.css`, so `dist/` is a complete, loadable
+plugin folder.
+
+To test in a vault, copy the contents of `dist/` (`main.js`, `manifest.json`,
+`styles.css`) into `<Vault>/.obsidian/plugins/vault-assistant/` and enable the
+plugin under **Settings → Community plugins**. (For local development the plugin
+folder name should match the `id` in `manifest.json`.)

@@ -1,5 +1,7 @@
 import esbuild from 'esbuild';
 import process from 'process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { builtinModules } from 'node:module';
 
 const banner = `/*
@@ -9,6 +11,24 @@ if you want to view the source, please visit the github repository of this plugi
 `;
 
 const prod = process.argv[2] === 'production';
+const outdir = 'dist';
+
+/**
+ * Copy the static plugin assets next to the bundle so `dist/` is a complete,
+ * loadable plugin folder (Obsidian needs main.js, manifest.json and styles.css
+ * together). Runs after every (re)build, including in watch mode.
+ */
+const copyAssets = {
+	name: 'copy-assets',
+	setup(build) {
+		build.onEnd(() => {
+			fs.mkdirSync(outdir, { recursive: true });
+			for (const file of ['manifest.json', 'styles.css']) {
+				if (fs.existsSync(file)) fs.copyFileSync(file, path.join(outdir, file));
+			}
+		});
+	},
+};
 
 const context = await esbuild.context({
 	banner: {
@@ -37,8 +57,9 @@ const context = await esbuild.context({
 	logLevel: 'info',
 	sourcemap: prod ? false : 'inline',
 	treeShaking: true,
-	outfile: 'main.js',
+	outfile: path.join(outdir, 'main.js'),
 	minify: prod,
+	plugins: [copyAssets],
 });
 
 if (prod) {
