@@ -13,8 +13,7 @@ export interface VaultAssistantSettings {
 	systemPrompt: string;
 
 	// --- Folder permissions ---
-	readScope: 'vault' | 'allowlist';
-	readPaths: string[];
+	readBlockPaths: string[];
 	writePaths: string[];
 	conversationsFolder: string;
 	wikiFolder: string;
@@ -42,8 +41,7 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	temperature: 0.7,
 	maxSteps: 12,
 	systemPrompt: DEFAULT_SYSTEM_PROMPT,
-	readScope: 'vault',
-	readPaths: [],
+	readBlockPaths: [],
 	writePaths: [],
 	conversationsFolder: 'AI/Conversations',
 	wikiFolder: 'AI/Wiki',
@@ -149,39 +147,22 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName('Folder permissions').setHeading();
 
 		new Setting(containerEl)
-			.setName('Read scope')
-			.setDesc('Whether the agent can read the whole vault or only an allowlist of folders.')
-			.addDropdown((d) =>
-				d
-					.addOption('vault', 'Entire vault')
-					.addOption('allowlist', 'Only allowed folders')
-					.setValue(s.readScope)
-					.onChange(async (v) => {
-						s.readScope = v as VaultAssistantSettings['readScope'];
-						await this.save();
-						this.display();
-					}),
-			);
-
-		if (s.readScope === 'allowlist') {
-			new Setting(containerEl)
-				.setName('Readable folders')
-				.setDesc(
-					'One folder per line. The agent can only read inside these (plus the conversations and wiki folders). e.g. "Daily Notes".',
-				)
-				.addTextArea((t) => {
-					t.inputEl.rows = 4;
-					t.setValue(s.readPaths.join('\n')).onChange(async (v) => {
-						s.readPaths = parseFolders(v);
-						await this.save();
-					});
+			.setName('Blocked folders (reads)')
+			.setDesc(
+				'One folder per line. The agent can read your whole vault except these. Blocked notes are hidden from it entirely — not listed, not searchable, and invisible to reads. e.g. "Private", "Journal".',
+			)
+			.addTextArea((t) => {
+				t.inputEl.rows = 4;
+				t.setValue(s.readBlockPaths.join('\n')).onChange(async (v) => {
+					s.readBlockPaths = parseFolders(v);
+					await this.save();
 				});
-		}
+			});
 
 		new Setting(containerEl)
 			.setName('Writable folders')
 			.setDesc(
-				'One folder per line. The agent may only create or edit files inside these (the conversations and wiki folders are always writable). Leave empty to keep all your own notes untouched.',
+				'One folder per line. The agent may write freely inside these (the conversations and wiki folders are always writable). Writing anywhere else pauses and asks you for approval. Leave empty to be asked before every write outside the AI folders.',
 			)
 			.addTextArea((t) => {
 				t.inputEl.rows = 4;

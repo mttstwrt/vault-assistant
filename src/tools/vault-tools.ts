@@ -1,8 +1,20 @@
 import { App, TFile, TFolder, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from '../settings';
-import { ToolSpec } from '../types';
-import { displayScopes, isReadable, isWritable, writeScopes } from '../permissions';
+import { ApprovalRequest, ApprovalResult, ToolSpec } from '../types';
+import { displayScopes, isReadable, isWritable, parentFolder, writeScopes } from '../permissions';
 import { buildWikiIndex, describeLinks } from './graph';
+
+/** Everything a tool invocation needs: the app, settings, and the approval hooks. */
+export interface ToolContext {
+	app: App;
+	settings: VaultAssistantSettings;
+	/** Persist settings after an "always allow" grant widens the write allowlist. */
+	saveSettings: () => Promise<void>;
+	/** Write paths approved for the rest of this conversation only. */
+	sessionWrites: Set<string>;
+	/** Ask the user to approve a write outside the allowlist. */
+	requestApproval: (req: ApprovalRequest) => Promise<ApprovalResult>;
+}
 
 export const TOOL_SPECS: ToolSpec[] = [
 	{
@@ -146,17 +158,42 @@ async function ensureFolder(app: App, folder: string): Promise<void> {
 	}
 }
 
-async function writeFile(
-	app: App,
-	settings: VaultAssistantSettings,
-	path: string,
-	content: string,
-): Promise<string> {
+/**
+ * Decide whether `path` may be written. Returns null to proceed, or an error
+ * string to hand back to the model when the user denies. Prompts the user for
+ * out-of-scope writes and may widen the allowlist (for this session, or
+ * persistently) as a side effect of an "always allow" grant.
+ */
+async function ensureWritable(ctx: ToolContext, tool: string, path: string): Promise<string | null> {
 	const p = normalizePath(path);
-	if (!isWritable(p, settings)) {
-		return `Error: writing to "${p}" is not permitted. Writable folders: ${displayScopes(writeScopes(settings))}.`;
+	if (isWritable(p, ctx.settings) || ctx.sessionWrites.has(p)) return null;
+
+	const folder = parentFolder(p);
+	const decision = await ctx.requestApproval({ tool, path: p, folder });
+	switch (decision) {
+		case 'once':
+			return null;
+		case 'session':
+			ctx.sessionWrites.add(p);
+			return null;
+		case 'always-file':
+			ctx.settings.writePaths.push(p);
+			await ctx.saveSettings();
+			return null;
+		case 'always-folder':
+			ctx.settings.writePaths.push(folder || p);
+			await ctx.saveSettings();
+			return null;
+		case 'deny':
+		default:
+			return `Error: writing to "${p}" is not permitted. Writable folders: ${displayScopes(writeScopes(ctx.settings))}.`;
 	}
-	const dir = p.split('/').slice(0, -1).join('/');
+}
+
+/** Create or overwrite a file, with no permission check. */
+async function doWrite(app: App, path: string, content: string): Promise<string> {
+	const p = normalizePath(path);
+	const dir = parentFolder(p);
 	if (dir) await ensureFolder(app, dir);
 
 	const existing = app.vault.getAbstractFileByPath(p);
@@ -166,6 +203,18 @@ async function writeFile(
 	}
 	await app.vault.create(p, content);
 	return `Created ${p}`;
+}
+
+/** Permission-checked create/overwrite. */
+async function writeFile(
+	ctx: ToolContext,
+	tool: string,
+	path: string,
+	content: string,
+): Promise<string> {
+	const denied = await ensureWritable(ctx, tool, path);
+	if (denied) return denied;
+	return doWrite(ctx.app, path, content);
 }
 
 /** Coerce an unknown tool argument to a string safely. */
@@ -182,11 +231,11 @@ function sanitizeTitle(title: string): string {
 
 /** Run a tool by name and return a string result for the model. */
 export async function executeTool(
-	app: App,
-	settings: VaultAssistantSettings,
+	ctx: ToolContext,
 	name: string,
 	argsJson: string,
 ): Promise<string> {
+	const { app, settings } = ctx;
 	let args: Record<string, unknown>;
 	try {
 		args = JSON.parse(argsJson || '{}') as Record<string, unknown>;
@@ -211,8 +260,11 @@ export async function executeTool(
 			case 'read_file': {
 				const p = normalizePath(str(args.path));
 				const f = app.vault.getAbstractFileByPath(p);
-				if (!(f instanceof TFile)) return `Error: file not found: "${p}".`;
-				if (!isReadable(p, settings)) return `Error: reading "${p}" is not permitted.`;
+				// Blocked files are hidden: report them as missing so the agent
+				// never learns they exist.
+				if (!(f instanceof TFile) || !isReadable(p, settings)) {
+					return `Error: file not found: "${p}".`;
+				}
 				return await app.vault.cachedRead(f);
 			}
 
@@ -238,20 +290,19 @@ export async function executeTool(
 			}
 
 			case 'write_file':
-				return await writeFile(app, settings, str(args.path), str(args.content));
+				return await writeFile(ctx, 'write_file', str(args.path), str(args.content));
 
 			case 'append_file': {
 				const p = normalizePath(str(args.path));
-				if (!isWritable(p, settings)) {
-					return `Error: writing to "${p}" is not permitted. Writable folders: ${displayScopes(writeScopes(settings))}.`;
-				}
+				const denied = await ensureWritable(ctx, 'append_file', p);
+				if (denied) return denied;
 				const existing = app.vault.getAbstractFileByPath(p);
 				if (existing instanceof TFile) {
 					const cur = await app.vault.read(existing);
 					await app.vault.modify(existing, cur + str(args.content));
 					return `Appended to ${p}`;
 				}
-				return await writeFile(app, settings, p, str(args.content));
+				return await doWrite(app, p, str(args.content));
 			}
 
 			case 'remember': {
@@ -264,14 +315,13 @@ export async function executeTool(
 				if (!content.trim()) return 'Error: memory content is required.';
 				const existing = app.vault.getAbstractFileByPath(path);
 				if (str(args.mode) !== 'replace' && existing instanceof TFile) {
-					if (!isWritable(path, settings)) {
-						return `Error: writing to "${path}" is not permitted.`;
-					}
+					const denied = await ensureWritable(ctx, 'remember', path);
+					if (denied) return denied;
 					const cur = await app.vault.read(existing);
 					await app.vault.modify(existing, `${cur.trimEnd()}\n\n${content}`);
 					return `Remembered (appended to ${path}).`;
 				}
-				await writeFile(app, settings, path, content);
+				await writeFile(ctx, 'remember', path, content);
 				return `Remembered (saved ${path}).`;
 			}
 
@@ -288,14 +338,13 @@ export async function executeTool(
 				const content = str(args.content);
 				const existing = app.vault.getAbstractFileByPath(path);
 				if (str(args.mode) === 'append' && existing instanceof TFile) {
-					if (!isWritable(path, settings)) {
-						return `Error: writing to "${path}" is not permitted.`;
-					}
+					const denied = await ensureWritable(ctx, 'update_wiki', path);
+					if (denied) return denied;
 					const cur = await app.vault.read(existing);
 					await app.vault.modify(existing, `${cur}\n\n${content}`);
 					return `Appended to ${path}`;
 				}
-				return await writeFile(app, settings, path, content);
+				return await writeFile(ctx, 'update_wiki', path, content);
 			}
 
 			default:

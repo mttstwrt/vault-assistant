@@ -1,6 +1,6 @@
 import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon } from 'obsidian';
 import type VaultAssistantPlugin from '../main';
-import { ChatMessage, ToolCall } from '../types';
+import { ApprovalRequest, ApprovalResult, ChatMessage, ToolCall } from '../types';
 import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
 import { newConversationPath, saveConversation } from '../conversation';
@@ -17,6 +17,10 @@ export class ChatView extends ItemView {
 	private inputEl!: HTMLTextAreaElement;
 	private sendBtn!: HTMLButtonElement;
 	private toolEls = new Map<string, HTMLElement>();
+	/** Write paths the user approved for the rest of this conversation. */
+	private sessionWrites = new Set<string>();
+	/** Resolvers for approval prompts awaiting a click, so we can cancel them. */
+	private pendingApprovals = new Set<(r: ApprovalResult) => void>();
 
 	constructor(leaf: WorkspaceLeaf, plugin: VaultAssistantPlugin) {
 		super(leaf);
@@ -67,16 +71,65 @@ export class ChatView extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
+		this.cancelPendingApprovals();
 		this.toolEls.clear();
 	}
 
 	private async resetConversation(): Promise<void> {
+		this.cancelPendingApprovals();
 		const systemPrompt = await buildSystemPrompt(this.app, this.plugin.settings);
 		this.history = [{ role: 'system', content: systemPrompt }];
 		this.conversationPath = null;
 		this.toolEls.clear();
+		this.sessionWrites.clear();
 		this.messagesEl.empty();
 		this.addInfo('New conversation. The agent can read and (within allowed folders) write your vault.');
+	}
+
+	/** Resolve any approval prompts still awaiting a click as denials. */
+	private cancelPendingApprovals(): void {
+		for (const resolve of this.pendingApprovals) resolve('deny');
+		this.pendingApprovals.clear();
+	}
+
+	/** Render an approval card and resolve when the user picks an option. */
+	private requestApproval(req: ApprovalRequest): Promise<ApprovalResult> {
+		return new Promise<ApprovalResult>((resolve) => {
+			this.pendingApprovals.add(resolve);
+
+			const card = this.messagesEl.createDiv({ cls: 'va-approval' });
+			const head = card.createDiv({ cls: 'va-approval-head' });
+			setIcon(head.createSpan({ cls: 'va-approval-icon' }), 'shield-alert');
+			head.createSpan({ text: ' Approval required' });
+			card.createDiv({
+				cls: 'va-approval-body',
+				text: `The agent wants to write outside your allowed folders (via ${req.tool}):`,
+			});
+			card.createEl('code', { cls: 'va-approval-path', text: req.path });
+
+			const row = card.createDiv({ cls: 'va-approval-actions' });
+			const settle = (result: ApprovalResult, label: string): void => {
+				if (!this.pendingApprovals.has(resolve)) return;
+				this.pendingApprovals.delete(resolve);
+				row.empty();
+				card.addClass('va-approval-done');
+				card.createDiv({ cls: 'va-approval-choice', text: `→ ${label}` });
+				this.scrollToBottom();
+				resolve(result);
+			};
+			const addBtn = (label: string, result: ApprovalResult, cls: string): void => {
+				const b = row.createEl('button', { cls: `va-approval-btn ${cls}`, text: label });
+				b.onclick = () => settle(result, label);
+			};
+
+			addBtn('Deny', 'deny', 'va-deny');
+			addBtn('Allow once', 'once', 'va-once');
+			addBtn('Allow for session', 'session', 'va-session');
+			addBtn('Always: this file', 'always-file', 'va-always');
+			if (req.folder) addBtn(`Always: ${req.folder}/`, 'always-folder', 'va-always');
+
+			this.scrollToBottom();
+		});
 	}
 
 	private scrollToBottom(): void {
@@ -148,12 +201,20 @@ export class ChatView extends ItemView {
 		const thinking = this.messagesEl.createDiv({ cls: 'va-info va-thinking', text: 'Thinking…' });
 		this.scrollToBottom();
 
-		await runAgent(this.app, this.plugin.settings, this.history, {
-			onAssistant: (c) => void this.addAssistantBubble(c),
-			onToolCall: (call) => this.addToolCall(call),
-			onToolResult: (call, res) => this.addToolResult(call, res),
-			onError: (msg) => this.addError(msg),
-		});
+		await runAgent(
+			this.app,
+			this.plugin.settings,
+			() => this.plugin.saveSettings(),
+			this.sessionWrites,
+			this.history,
+			{
+				onAssistant: (c) => void this.addAssistantBubble(c),
+				onToolCall: (call) => this.addToolCall(call),
+				onToolResult: (call, res) => this.addToolResult(call, res),
+				onError: (msg) => this.addError(msg),
+				requestApproval: (req) => this.requestApproval(req),
+			},
+		);
 
 		thinking.remove();
 		this.setBusy(false);

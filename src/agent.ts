@@ -1,14 +1,16 @@
 import { App } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
-import { ChatMessage, ToolCall } from './types';
+import { ApprovalRequest, ApprovalResult, ChatMessage, ToolCall } from './types';
 import { chatCompletion } from './api/client';
-import { TOOL_SPECS, executeTool } from './tools/vault-tools';
+import { TOOL_SPECS, ToolContext, executeTool } from './tools/vault-tools';
 
 export interface AgentEvents {
 	onAssistant(content: string): void;
 	onToolCall(call: ToolCall): void;
 	onToolResult(call: ToolCall, result: string): void;
 	onError(message: string): void;
+	/** Ask the user to approve a write outside the allowed folders. */
+	requestApproval: (req: ApprovalRequest) => Promise<ApprovalResult>;
 }
 
 /**
@@ -19,9 +21,19 @@ export interface AgentEvents {
 export async function runAgent(
 	app: App,
 	settings: VaultAssistantSettings,
+	saveSettings: () => Promise<void>,
+	sessionWrites: Set<string>,
 	history: ChatMessage[],
 	events: AgentEvents,
 ): Promise<ChatMessage[]> {
+	const ctx: ToolContext = {
+		app,
+		settings,
+		saveSettings,
+		sessionWrites,
+		requestApproval: events.requestApproval,
+	};
+
 	for (let step = 0; step < settings.maxSteps; step++) {
 		let result;
 		try {
@@ -43,7 +55,7 @@ export async function runAgent(
 
 		for (const call of result.toolCalls) {
 			events.onToolCall(call);
-			const out = await executeTool(app, settings, call.name, call.arguments);
+			const out = await executeTool(ctx, call.name, call.arguments);
 			events.onToolResult(call, out);
 			history.push({ role: 'tool', toolCallId: call.id, content: out });
 		}

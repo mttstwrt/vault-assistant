@@ -1,6 +1,6 @@
 import { App } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
-import { displayScopes, readScopes, writeScopes } from './permissions';
+import { displayScopes, writeScopes } from './permissions';
 import { buildMemorySection } from './memory';
 
 /**
@@ -9,10 +9,9 @@ import { buildMemorySection } from './memory';
  * what it may touch, and the agent's operating memory for this vault.
  */
 export async function buildSystemPrompt(app: App, settings: VaultAssistantSettings): Promise<string> {
-	const readDesc =
-		settings.readScope === 'vault'
-			? 'the entire vault'
-			: `only these folders: ${displayScopes(readScopes(settings))}`;
+	const readDesc = settings.readBlockPaths.length
+		? 'your whole vault except a few private areas the user has blocked (those files are hidden from you)'
+		: 'your whole vault';
 
 	const env = [
 		'',
@@ -20,8 +19,8 @@ export async function buildSystemPrompt(app: App, settings: VaultAssistantSettin
 		`Conversations folder: ${settings.conversationsFolder}`,
 		`Wiki folder: ${settings.wikiFolder}`,
 		`You can READ: ${readDesc}.`,
-		`You can WRITE only inside: ${displayScopes(writeScopes(settings))}.`,
-		'Attempts to write elsewhere will be rejected, so do not try.',
+		`You can WRITE freely inside: ${displayScopes(writeScopes(settings))}.`,
+		'Writing anywhere else will pause and ask the user to approve it first, so only write outside these folders when the user has actually asked you to.',
 	].join('\n');
 
 	const memory = await buildMemorySection(app, settings);

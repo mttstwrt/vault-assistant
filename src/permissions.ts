@@ -17,23 +17,38 @@ function underAny(path: string, folders: string[]): boolean {
 	return false;
 }
 
-/** Folders the agent is allowed to write into. */
-export function writeScopes(s: VaultAssistantSettings): string[] {
-	return [...s.writePaths, s.conversationsFolder, s.wikiFolder, s.memoryFile];
+/** The parent folder of a path ('' for a root-level file). */
+export function parentFolder(path: string): string {
+	return norm(path).split('/').slice(0, -1).join('/');
 }
 
-/** Folders the agent is allowed to read from when scope is restricted. */
-export function readScopes(s: VaultAssistantSettings): string[] {
-	return [...s.readPaths, s.conversationsFolder, s.wikiFolder, s.memoryFile];
+/** Folders the agent's own working files always live in (always read+write). */
+function specialFolders(s: VaultAssistantSettings): string[] {
+	return [s.conversationsFolder, s.wikiFolder, s.memoryFile];
+}
+
+/** Folders the agent is allowed to write into. */
+export function writeScopes(s: VaultAssistantSettings): string[] {
+	return [...s.writePaths, ...specialFolders(s)];
+}
+
+/** Folders/files the agent must never see (read blocklist). */
+export function blockedReadPaths(s: VaultAssistantSettings): string[] {
+	return s.readBlockPaths;
 }
 
 export function isWritable(path: string, s: VaultAssistantSettings): boolean {
 	return underAny(path, writeScopes(s));
 }
 
+/**
+ * Reads are default-allow: the agent can read the whole vault except explicitly
+ * blocked folders. Its own working folders are always readable, even if a
+ * blocked folder would otherwise cover them.
+ */
 export function isReadable(path: string, s: VaultAssistantSettings): boolean {
-	if (s.readScope === 'vault') return true;
-	return underAny(path, readScopes(s));
+	if (underAny(path, specialFolders(s))) return true;
+	return !underAny(path, s.readBlockPaths);
 }
 
 export function displayScopes(folders: string[]): string {

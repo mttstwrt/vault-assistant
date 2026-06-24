@@ -130,6 +130,59 @@
 	overflow: auto;
 }
 
+.va-approval {
+	font-size: var(--font-ui-small);
+	border: 1px solid var(--text-warning);
+	border-left-width: 3px;
+	border-radius: 8px;
+	padding: 8px 10px;
+	background: var(--background-secondary);
+}
+.va-approval-head {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	font-weight: 600;
+	color: var(--text-warning);
+}
+.va-approval-icon {
+	display: inline-flex;
+	vertical-align: middle;
+}
+.va-approval-body {
+	margin: 6px 0 4px;
+	color: var(--text-muted);
+}
+.va-approval-path {
+	display: block;
+	padding: 4px 6px;
+	background: var(--background-primary-alt);
+	border-radius: 6px;
+	font-size: var(--font-smallest);
+	word-break: break-all;
+}
+.va-approval-actions {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+	margin-top: 8px;
+}
+.va-approval-btn {
+	cursor: pointer;
+	font-size: var(--font-ui-smaller);
+}
+.va-approval-btn.va-deny {
+	color: var(--text-error);
+}
+.va-approval-choice {
+	margin-top: 6px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}
+.va-approval-done {
+	opacity: 0.75;
+}
+
 .va-input-row {
 	display: flex;
 	gap: 6px;
