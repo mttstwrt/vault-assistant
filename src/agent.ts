@@ -3,6 +3,7 @@ import { VaultAssistantSettings } from './settings';
 import { ApprovalRequest, ApprovalResult, ChatMessage, ToolCall } from './types';
 import { chatCompletion } from './api/client';
 import { TOOL_SPECS, ToolContext, executeTool } from './tools/vault-tools';
+import { McpManager } from './mcp/manager';
 
 export interface AgentEvents {
 	onAssistant(content: string): void;
@@ -22,7 +23,9 @@ export async function runAgent(
 	app: App,
 	settings: VaultAssistantSettings,
 	saveSettings: () => Promise<void>,
+	mcp: McpManager,
 	sessionWrites: Set<string>,
+	sessionMcp: Set<string>,
 	history: ChatMessage[],
 	events: AgentEvents,
 ): Promise<ChatMessage[]> {
@@ -31,13 +34,16 @@ export async function runAgent(
 		settings,
 		saveSettings,
 		sessionWrites,
+		sessionMcp,
+		mcp,
 		requestApproval: events.requestApproval,
 	};
+	const tools = [...TOOL_SPECS, ...mcp.toolSpecs()];
 
 	for (let step = 0; step < settings.maxSteps; step++) {
 		let result;
 		try {
-			result = await chatCompletion(settings, history, TOOL_SPECS);
+			result = await chatCompletion(settings, history, tools);
 		} catch (e) {
 			events.onError(e instanceof Error ? e.message : String(e));
 			return history;

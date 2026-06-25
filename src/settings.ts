@@ -1,6 +1,21 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
 import type VaultAssistantPlugin from './main';
 
+/** One configured MCP server. stdio uses command/args/env; http uses url/headers. */
+export interface McpServerConfig {
+	id: string;
+	name: string;
+	enabled: boolean;
+	/** Trusted servers' tools run without an approval prompt. */
+	trusted: boolean;
+	transport: 'stdio' | 'http';
+	command?: string;
+	args?: string[];
+	env?: Record<string, string>;
+	url?: string;
+	headers?: Record<string, string>;
+}
+
 export interface VaultAssistantSettings {
 	// --- Model endpoint ---
 	baseUrl: string;
@@ -22,6 +37,9 @@ export interface VaultAssistantSettings {
 	// --- Operating memory ---
 	useMemory: boolean;
 	memoryFile: string;
+
+	// --- MCP ---
+	mcpServers: McpServerConfig[];
 }
 
 export const DEFAULT_SYSTEM_PROMPT = `You are an AI assistant embedded inside the user's Obsidian vault. You can read, search, and (only within permitted folders) write notes using the provided tools, the same way a coding agent works inside a code repository.
@@ -48,6 +66,7 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	autoSaveConversations: true,
 	useMemory: true,
 	memoryFile: 'AI/Memory.md',
+	mcpServers: [],
 };
 
 /** Parse a textarea of newline/comma-separated folders into a clean list. */
@@ -239,6 +258,45 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 						}),
 				);
 		}
+
+		new Setting(containerEl).setName('MCP servers').setHeading();
+
+		const err = containerEl.createDiv({ cls: 'va-settings-error' });
+
+		new Setting(containerEl)
+			.setName('Server definitions')
+			.setDesc(
+				'JSON array of MCP servers. Each: {"id","name","enabled":true,"trusted":false,"transport":"stdio","command":"npx","args":[...],"env":{}} or {"transport":"http","url":"https://…","headers":{}}. stdio servers run only on desktop. Trusted servers’ tools run without an approval prompt.',
+			)
+			.addTextArea((t) => {
+				t.inputEl.rows = 8;
+				t.inputEl.addClass('va-wide-textarea');
+				t.setValue(JSON.stringify(s.mcpServers, null, 2)).onChange(async (v) => {
+					err.setText('');
+					if (!v.trim()) {
+						s.mcpServers = [];
+						await this.save();
+						return;
+					}
+					try {
+						const parsed: unknown = JSON.parse(v);
+						if (!Array.isArray(parsed)) throw new Error('Expected a JSON array.');
+						s.mcpServers = parsed as VaultAssistantSettings['mcpServers'];
+						await this.save();
+					} catch (e) {
+						err.setText(`Invalid JSON: ${e instanceof Error ? e.message : String(e)}`);
+					}
+				});
+			});
+
+		new Setting(containerEl)
+			.setName('Reconnect servers')
+			.setDesc('Apply server changes by reconnecting now.')
+			.addButton((b) =>
+				b.setButtonText('Reconnect').onClick(async () => {
+					await this.plugin.reconnectMcp();
+				}),
+			);
 
 		new Setting(containerEl).setName('Agent prompt').setHeading();
 

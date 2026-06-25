@@ -19,6 +19,8 @@ export class ChatView extends ItemView {
 	private toolEls = new Map<string, HTMLElement>();
 	/** Write paths the user approved for the rest of this conversation. */
 	private sessionWrites = new Set<string>();
+	/** MCP tools the user approved for the rest of this conversation. */
+	private sessionMcp = new Set<string>();
 	/** Resolvers for approval prompts awaiting a click, so we can cancel them. */
 	private pendingApprovals = new Set<(r: ApprovalResult) => void>();
 
@@ -82,6 +84,7 @@ export class ChatView extends ItemView {
 		this.conversationPath = null;
 		this.toolEls.clear();
 		this.sessionWrites.clear();
+		this.sessionMcp.clear();
 		this.messagesEl.empty();
 		this.addInfo('New conversation. The agent can read and (within allowed folders) write your vault.');
 	}
@@ -100,12 +103,20 @@ export class ChatView extends ItemView {
 			const card = this.messagesEl.createDiv({ cls: 'va-approval' });
 			const head = card.createDiv({ cls: 'va-approval-head' });
 			setIcon(head.createSpan({ cls: 'va-approval-icon' }), 'shield-alert');
-			head.createSpan({ text: ' Approval required' });
-			card.createDiv({
-				cls: 'va-approval-body',
-				text: `The agent wants to write outside your allowed folders (via ${req.tool}):`,
-			});
-			card.createEl('code', { cls: 'va-approval-path', text: req.path });
+			head.createSpan({ text: req.kind === 'mcp' ? ' External tool call' : ' Approval required' });
+			if (req.kind === 'mcp') {
+				card.createDiv({
+					cls: 'va-approval-body',
+					text: `The agent wants to call an external MCP tool on "${req.serverName}":`,
+				});
+				card.createEl('code', { cls: 'va-approval-path', text: req.tool });
+			} else {
+				card.createDiv({
+					cls: 'va-approval-body',
+					text: `The agent wants to write outside your allowed folders (via ${req.tool}):`,
+				});
+				card.createEl('code', { cls: 'va-approval-path', text: req.path ?? '' });
+			}
 
 			const row = card.createDiv({ cls: 'va-approval-actions' });
 			const settle = (result: ApprovalResult, label: string): void => {
@@ -125,8 +136,12 @@ export class ChatView extends ItemView {
 			addBtn('Deny', 'deny', 'va-deny');
 			addBtn('Allow once', 'once', 'va-once');
 			addBtn('Allow for session', 'session', 'va-session');
-			addBtn('Always: this file', 'always-file', 'va-always');
-			if (req.folder) addBtn(`Always: ${req.folder}/`, 'always-folder', 'va-always');
+			if (req.kind === 'mcp') {
+				addBtn(`Always trust ${req.serverName}`, 'always-trust', 'va-always');
+			} else {
+				addBtn('Always: this file', 'always-file', 'va-always');
+				if (req.folder) addBtn(`Always: ${req.folder}/`, 'always-folder', 'va-always');
+			}
 
 			this.scrollToBottom();
 		});
@@ -205,7 +220,9 @@ export class ChatView extends ItemView {
 			this.app,
 			this.plugin.settings,
 			() => this.plugin.saveSettings(),
+			this.plugin.mcp,
 			this.sessionWrites,
+			this.sessionMcp,
 			this.history,
 			{
 				onAssistant: (c) => void this.addAssistantBubble(c),

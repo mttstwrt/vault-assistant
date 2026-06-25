@@ -38,4 +38,17 @@ export default tseslint.config(
 			'obsidianmd/ui/sentence-case': 'off',
 		},
 	},
+	{
+		// The MCP stdio transport is desktop-only and deliberately uses Node's
+		// child_process and process/Buffer globals (guarded by Platform.isDesktopApp).
+		files: ['src/mcp/transport.ts'],
+		languageOptions: {
+			globals: {
+				...globals.node,
+			},
+		},
+		rules: {
+			'import/no-nodejs-modules': 'off',
+		},
+	},
 );

@@ -2,6 +2,7 @@ import { App, TFile, TFolder, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from '../settings';
 import { ApprovalRequest, ApprovalResult, ToolSpec } from '../types';
 import { displayScopes, isReadable, isWritable, parentFolder, writeScopes } from '../permissions';
+import { McpManager } from '../mcp/manager';
 import { buildWikiIndex, describeLinks } from './graph';
 
 /** Everything a tool invocation needs: the app, settings, and the approval hooks. */
@@ -12,7 +13,11 @@ export interface ToolContext {
 	saveSettings: () => Promise<void>;
 	/** Write paths approved for the rest of this conversation only. */
 	sessionWrites: Set<string>;
-	/** Ask the user to approve a write outside the allowlist. */
+	/** MCP tool names approved for the rest of this conversation only. */
+	sessionMcp: Set<string>;
+	/** Connected MCP servers and their tools. */
+	mcp: McpManager;
+	/** Ask the user to approve a write outside the allowlist, or an MCP call. */
 	requestApproval: (req: ApprovalRequest) => Promise<ApprovalResult>;
 }
 
@@ -169,7 +174,7 @@ async function ensureWritable(ctx: ToolContext, tool: string, path: string): Pro
 	if (isWritable(p, ctx.settings) || ctx.sessionWrites.has(p)) return null;
 
 	const folder = parentFolder(p);
-	const decision = await ctx.requestApproval({ tool, path: p, folder });
+	const decision = await ctx.requestApproval({ kind: 'write', tool, path: p, folder });
 	switch (decision) {
 		case 'once':
 			return null;
@@ -188,6 +193,38 @@ async function ensureWritable(ctx: ToolContext, tool: string, path: string): Pro
 		default:
 			return `Error: writing to "${p}" is not permitted. Writable folders: ${displayScopes(writeScopes(ctx.settings))}.`;
 	}
+}
+
+/**
+ * Run an MCP tool, gating untrusted servers behind the approval card. Returns
+ * the tool output, or an error string if the user denies.
+ */
+async function callMcp(ctx: ToolContext, name: string, argsJson: string): Promise<string> {
+	const cfg = ctx.mcp.serverFor(name);
+	if (!cfg) return `Error: unknown MCP tool "${name}".`;
+
+	if (!ctx.mcp.isTrusted(name) && !ctx.sessionMcp.has(name)) {
+		const decision = await ctx.requestApproval({
+			kind: 'mcp',
+			tool: name,
+			serverId: cfg.id,
+			serverName: cfg.name,
+		});
+		switch (decision) {
+			case 'once':
+				break;
+			case 'session':
+				ctx.sessionMcp.add(name);
+				break;
+			case 'always-trust':
+				cfg.trusted = true;
+				await ctx.saveSettings();
+				break;
+			default:
+				return `Error: calling "${name}" was not permitted by the user.`;
+		}
+	}
+	return ctx.mcp.callTool(name, argsJson);
 }
 
 /** Create or overwrite a file, with no permission check. */
@@ -348,6 +385,7 @@ export async function executeTool(
 			}
 
 			default:
+				if (name.startsWith('mcp__')) return await callMcp(ctx, name, argsJson);
 				return `Error: unknown tool "${name}".`;
 		}
 	} catch (e) {
