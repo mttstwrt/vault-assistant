@@ -2,6 +2,7 @@ import { App } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
 import { displayScopes, writeScopes } from './permissions';
 import { buildMemorySection } from './memory';
+import { buildWikiSection } from './wiki';
 
 /**
  * Build the full system prompt: the user's base instructions, a live
@@ -24,6 +25,7 @@ export async function buildSystemPrompt(app: App, settings: VaultAssistantSettin
 	].join('\n');
 
 	const memory = await buildMemorySection(app, settings);
+	const wiki = await buildWikiSection(app, settings);
 
-	return `${settings.systemPrompt}\n${env}${memory}`;
+	return `${settings.systemPrompt}\n${env}${memory}${wiki}`;
 }

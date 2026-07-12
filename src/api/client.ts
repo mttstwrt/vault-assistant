@@ -17,6 +17,57 @@ interface ChatCompletionResponse {
 	}>;
 }
 
+interface EmbeddingsResponse {
+	data?: Array<{ embedding?: number[]; index?: number }>;
+}
+
+/**
+ * Embed a batch of texts via an OpenAI-compatible /embeddings endpoint
+ * (Ollama, LM Studio, and OpenAI all expose one). Defaults to the chat
+ * endpoint/key; embedBaseUrl/embedApiKey override them for split setups.
+ */
+export async function embed(
+	settings: VaultAssistantSettings,
+	texts: string[],
+): Promise<number[][]> {
+	const base = (settings.embedBaseUrl.trim() || settings.baseUrl).replace(/\/+$/, '');
+	if (!base) throw new Error('No embeddings base URL configured. Set one in settings.');
+	const model = settings.embedModel.trim();
+	if (!model) throw new Error('No embedding model configured. Set one in settings.');
+
+	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+	const key = settings.embedApiKey.trim() || settings.apiKey.trim();
+	if (key) headers['Authorization'] = `Bearer ${key}`;
+
+	const res = await requestUrl({
+		url: `${base}/embeddings`,
+		method: 'POST',
+		headers,
+		body: JSON.stringify({ model, input: texts }),
+		throw: false,
+	});
+
+	if (res.status >= 400) {
+		const detail = (res.text ?? '').slice(0, 300);
+		throw new Error(`Embeddings API error ${res.status}: ${detail}`);
+	}
+
+	const data = (res.json as EmbeddingsResponse)?.data;
+	if (!Array.isArray(data) || data.length !== texts.length) {
+		throw new Error(
+			`Embeddings API returned ${Array.isArray(data) ? data.length : 0} vectors for ${texts.length} inputs.`,
+		);
+	}
+	return [...data]
+		.sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
+		.map((d) => {
+			if (!Array.isArray(d.embedding) || !d.embedding.length) {
+				throw new Error('Embeddings API returned an empty embedding.');
+			}
+			return d.embedding;
+		});
+}
+
 /** Convert our internal message shape to the OpenAI chat schema. */
 function toApiMessage(m: ChatMessage): Record<string, unknown> {
 	if (m.role === 'assistant' && m.toolCalls && m.toolCalls.length > 0) {

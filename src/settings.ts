@@ -38,6 +38,26 @@ export interface VaultAssistantSettings {
 	useMemory: boolean;
 	memoryFile: string;
 
+	// --- Wiki ---
+	/** Title of the curated entry page inside the wiki folder. */
+	wikiHomeNote: string;
+	/** Inject a compact pointer to the wiki Home page at session start. */
+	useWikiIndex: boolean;
+
+	// --- Semantic search (RAG) ---
+	/** Master opt-in: embeddings send note contents to the embed endpoint. */
+	useRag: boolean;
+	embedModel: string;
+	/** Optional override; empty = use the chat baseUrl. */
+	embedBaseUrl: string;
+	/** Optional override; empty = use the chat apiKey. */
+	embedApiKey: string;
+	ragTopK: number;
+	/** Also embed wiki pages, so semantic search lands on curated pages. */
+	ragIndexWiki: boolean;
+	/** Also embed saved conversations (filtered: user turns + final answers). */
+	ragIndexConversations: boolean;
+
 	// --- MCP ---
 	mcpServers: McpServerConfig[];
 }
@@ -47,10 +67,30 @@ export const DEFAULT_SYSTEM_PROMPT = `You are an AI assistant embedded inside th
 Guidelines:
 - Treat the user's personal notes as READ-ONLY context. Never modify a note unless the user explicitly asks you to edit that specific file, and only if it is in a writable folder.
 - Your "Operating memory" (shown below, if present) is what you already know about how THIS vault is organised — where data lives, the formats and conventions the user uses, and corrections they have given you. Trust it and act on it before exploring. When you learn a durable fact like this, or the user corrects you (e.g. "habits are tracked here now, not there"), save it with the remember tool so you don't relearn it next time. Keep that memory short and high-signal; prefer correcting/replacing stale entries over piling on duplicates.
-- When you learn or synthesise something worth keeping, save it to the wiki. First call list_wiki to see what already exists, then either extend an existing page (update_wiki with mode "append") or add a new one, so the wiki grows coherently instead of duplicating pages. (Memory = how the vault works; wiki = what's in it.)
+- The wiki is your curated knowledge base of WHAT is in this vault (memory = how the vault works; wiki = what's in it). To recall curated knowledge, start at the wiki Home page (wiki_home) and follow its [[links]] toward the topic with wiki_page, reading pages as you go — never dump the whole wiki into context. list_wiki is the sitemap: use it for maintenance and before creating pages, not as the default way in.
+- Choose the right retrieval tool: a known, structured topic → wiki_home, then follow links; fuzzy recall ("somewhere there's something about…") → semantic_search (when available), then read the note or wiki page it surfaces; an exact phrase or filename → search.
+- When you learn or synthesise something worth keeping, save it to the wiki: extend an existing page (update_wiki with mode "append") when one fits, otherwise create a new page — and always link a new page into the Home page and its related pages so nothing is orphaned.
+- Curate the wiki as it grows: fix the orphan pages and broken [[links]] that list_wiki reports, split pages that have grown too big, and merge duplicates.
 - Connect wiki notes to each other and to the user's existing notes and past conversations using [[wikilinks]]. Use the links tool to discover how a note already connects before linking.
 - Prefer searching and reading the vault before answering, so your responses are grounded in the user's actual notes.
 - Be concise and direct. Do the work; don't narrate every step.`;
+
+/**
+ * Defaults we previously shipped. When a saved systemPrompt matches one of
+ * these verbatim (i.e. the user never customised it), loadSettings upgrades it
+ * to the current DEFAULT_SYSTEM_PROMPT.
+ */
+export const LEGACY_SYSTEM_PROMPTS: string[] = [
+	`You are an AI assistant embedded inside the user's Obsidian vault. You can read, search, and (only within permitted folders) write notes using the provided tools, the same way a coding agent works inside a code repository.
+
+Guidelines:
+- Treat the user's personal notes as READ-ONLY context. Never modify a note unless the user explicitly asks you to edit that specific file, and only if it is in a writable folder.
+- Your "Operating memory" (shown below, if present) is what you already know about how THIS vault is organised — where data lives, the formats and conventions the user uses, and corrections they have given you. Trust it and act on it before exploring. When you learn a durable fact like this, or the user corrects you (e.g. "habits are tracked here now, not there"), save it with the remember tool so you don't relearn it next time. Keep that memory short and high-signal; prefer correcting/replacing stale entries over piling on duplicates.
+- When you learn or synthesise something worth keeping, save it to the wiki. First call list_wiki to see what already exists, then either extend an existing page (update_wiki with mode "append") or add a new one, so the wiki grows coherently instead of duplicating pages. (Memory = how the vault works; wiki = what's in it.)
+- Connect wiki notes to each other and to the user's existing notes and past conversations using [[wikilinks]]. Use the links tool to discover how a note already connects before linking.
+- Prefer searching and reading the vault before answering, so your responses are grounded in the user's actual notes.
+- Be concise and direct. Do the work; don't narrate every step.`,
+];
 
 export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	baseUrl: 'http://localhost:11434/v1',
@@ -66,6 +106,15 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	autoSaveConversations: true,
 	useMemory: true,
 	memoryFile: 'AI/Memory.md',
+	wikiHomeNote: 'Home',
+	useWikiIndex: true,
+	useRag: false,
+	embedModel: 'nomic-embed-text',
+	embedBaseUrl: '',
+	embedApiKey: '',
+	ragTopK: 8,
+	ragIndexWiki: false,
+	ragIndexConversations: false,
 	mcpServers: [],
 };
 
@@ -256,6 +305,160 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 							s.memoryFile = v.trim();
 							await this.save();
 						}),
+				);
+		}
+
+		new Setting(containerEl).setName('Wiki').setHeading();
+
+		new Setting(containerEl)
+			.setName('Home page title')
+			.setDesc(
+				'Title of the curated entry page inside the wiki folder — the table of contents the agent starts from and links new pages into.',
+			)
+			.addText((t) =>
+				t
+					.setPlaceholder('Home')
+					.setValue(s.wikiHomeNote)
+					.onChange(async (v) => {
+						s.wikiHomeNote = v.trim();
+						await this.save();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Show wiki index at session start')
+			.setDesc(
+				'Inject a compact pointer to the wiki Home page into each new conversation, so the agent knows what curated knowledge exists without loading the whole wiki.',
+			)
+			.addToggle((t) =>
+				t.setValue(s.useWikiIndex).onChange(async (v) => {
+					s.useWikiIndex = v;
+					await this.save();
+				}),
+			);
+
+		new Setting(containerEl).setName('Semantic search').setHeading();
+
+		new Setting(containerEl)
+			.setName('Enable semantic search')
+			.setDesc(
+				'Index the vault with an embedding model and give the agent a semantic_search tool. Note contents are sent to the embedding endpoint — use a local model (Ollama/LM Studio) to stay offline.',
+			)
+			.addToggle((t) =>
+				t.setValue(s.useRag).onChange(async (v) => {
+					s.useRag = v;
+					await this.save();
+					this.display();
+				}),
+			);
+
+		if (s.useRag) {
+			new Setting(containerEl)
+				.setName('Embedding model')
+				.setDesc('e.g. nomic-embed-text (Ollama) or text-embedding-3-small (OpenAI).')
+				.addText((t) =>
+					t
+						.setPlaceholder('nomic-embed-text')
+						.setValue(s.embedModel)
+						.onChange(async (v) => {
+							s.embedModel = v.trim();
+							await this.save();
+						}),
+				);
+
+			new Setting(containerEl)
+				.setName('Embedding base URL')
+				.setDesc('Optional. Leave empty to use the chat base URL.')
+				.addText((t) =>
+					t
+						.setPlaceholder('(chat base URL)')
+						.setValue(s.embedBaseUrl)
+						.onChange(async (v) => {
+							s.embedBaseUrl = v.trim();
+							await this.save();
+						}),
+				);
+
+			new Setting(containerEl)
+				.setName('Embedding API key')
+				.setDesc('Optional. Leave empty to use the chat API key.')
+				.addText((t) => {
+					t.inputEl.type = 'password';
+					t.setPlaceholder('(chat API key)')
+						.setValue(s.embedApiKey)
+						.onChange(async (v) => {
+							s.embedApiKey = v.trim();
+							await this.save();
+						});
+				});
+
+			new Setting(containerEl)
+				.setName('Results per search')
+				.setDesc('How many chunks semantic_search returns by default.')
+				.addText((t) =>
+					t.setValue(String(s.ragTopK)).onChange(async (v) => {
+						const n = parseInt(v, 10);
+						if (!Number.isNaN(n) && n > 0) {
+							s.ragTopK = n;
+							await this.save();
+						}
+					}),
+				);
+
+			new Setting(containerEl)
+				.setName('Index wiki pages')
+				.setDesc('Also embed the wiki, so semantic search can land directly on curated pages.')
+				.addToggle((t) =>
+					t.setValue(s.ragIndexWiki).onChange(async (v) => {
+						s.ragIndexWiki = v;
+						await this.save();
+					}),
+				);
+
+			new Setting(containerEl)
+				.setName('Index conversations')
+				.setDesc(
+					'Also embed saved conversations, filtered to your messages and the agent’s final answers (tool calls and intermediate steps are dropped).',
+				)
+				.addToggle((t) =>
+					t.setValue(s.ragIndexConversations).onChange(async (v) => {
+						s.ragIndexConversations = v;
+						await this.save();
+					}),
+				);
+
+			const status = containerEl.createDiv({ cls: 'va-rag-status' });
+			const showStatus = (text: string) => status.setText(text);
+			void this.plugin.rag
+				.status()
+				.then((st) =>
+					showStatus(
+						st.chunks
+							? `${st.chunks} chunks from ${st.files} files` +
+									(st.lastIndexed
+										? ` · last indexed ${new Date(st.lastIndexed).toLocaleString()}`
+										: '')
+							: 'Not indexed yet.',
+					),
+				);
+
+			new Setting(containerEl)
+				.setName('Reindex now')
+				.setDesc('Rebuild the semantic index. Unchanged chunks are not re-embedded.')
+				.addButton((b) =>
+					b.setButtonText('Reindex').onClick(async () => {
+						b.setDisabled(true);
+						try {
+							const res = await this.plugin.rag.reindexAll((done, total) =>
+								showStatus(`Indexing… ${done}/${total} files`),
+							);
+							showStatus(`${res.chunks} chunks from ${res.files} files · just indexed`);
+						} catch (e) {
+							showStatus(`Indexing failed: ${e instanceof Error ? e.message : String(e)}`);
+						} finally {
+							b.setDisabled(false);
+						}
+					}),
 				);
 		}
 

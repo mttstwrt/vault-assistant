@@ -3,7 +3,7 @@ import { VaultAssistantSettings } from '../settings';
 import { isReadable } from '../permissions';
 
 /** True when `path` sits inside (or equals) `folder`. */
-function inFolder(path: string, folder: string): boolean {
+export function inFolder(path: string, folder: string): boolean {
 	const f = normalizePath(folder).replace(/^\/+|\/+$/g, '');
 	const p = normalizePath(path);
 	if (!f) return true;
@@ -24,10 +24,17 @@ function buildBacklinks(app: App): Record<string, string[]> {
 	return back;
 }
 
+/** Vault path of the wiki's Home (entry) page. */
+export function wikiHomePath(settings: VaultAssistantSettings): string {
+	const title = settings.wikiHomeNote.trim() || 'Home';
+	return normalizePath(`${settings.wikiFolder}/${title}.md`);
+}
+
 /**
  * A readable map of the wiki: every wiki note plus its outgoing links and the
- * notes (anywhere in the vault, including past conversations) that link to it.
- * Lets the agent extend and cross-link the wiki coherently across sessions.
+ * notes (anywhere in the vault, including past conversations) that link to it,
+ * followed by a maintenance worklist (orphan pages, broken links). Lets the
+ * agent extend, cross-link, and curate the wiki coherently across sessions.
  */
 export function buildWikiIndex(app: App, settings: VaultAssistantSettings): string {
 	const files = app.vault
@@ -49,7 +56,54 @@ export function buildWikiIndex(app: App, settings: VaultAssistantSettings): stri
 		if (out.length) lines.push(`    → links to: ${out.join(', ')}`);
 		if (incoming.length) lines.push(`    ← linked from: ${incoming.join(', ')}`);
 	}
+
+	// Maintenance worklist: what curation should fix next.
+	const home = wikiHomePath(settings);
+	const orphans = files.filter((f) => f.path !== home && !(back[f.path] ?? []).length);
+	const broken: string[] = [];
+	for (const f of files) {
+		const unresolved = Object.keys(app.metadataCache.unresolvedLinks[f.path] ?? {});
+		if (unresolved.length) broken.push(`${f.path} → ${unresolved.join(', ')}`);
+	}
+	if (orphans.length || broken.length) {
+		lines.push('', 'Maintenance needed:');
+		if (orphans.length) {
+			lines.push(`- Orphan pages (no backlinks — link them into ${home} or a related page):`);
+			for (const f of orphans) lines.push(`    ${f.path}`);
+		}
+		if (broken.length) {
+			lines.push('- Broken [[links]] (create the target page or fix the link):');
+			for (const b of broken) lines.push(`    ${b}`);
+		}
+	}
 	return lines.join('\n');
+}
+
+/**
+ * A compact pointer to the wiki's curated entry point, for session-start
+ * injection: the Home page's first lines (its table of contents), not the
+ * whole wiki. Returns '' when the wiki is empty — nothing to point at.
+ */
+export async function buildWikiHomePointer(
+	app: App,
+	settings: VaultAssistantSettings,
+): Promise<string> {
+	const pages = app.vault.getMarkdownFiles().filter((f) => inFolder(f.path, settings.wikiFolder));
+	if (!pages.length) return '';
+
+	const homePath = wikiHomePath(settings);
+	const home = app.vault.getAbstractFileByPath(homePath);
+	if (!(home instanceof TFile)) {
+		return `The wiki has ${pages.length} page(s) but no "${homePath}" entry page yet. When you next work with the wiki, create it with update_wiki: a short, curated table of contents whose [[links]] lead to the top-level topics.`;
+	}
+
+	const MAX_LINES = 40;
+	const MAX_CHARS = 1500;
+	const text = (await app.vault.cachedRead(home)).trim();
+	const lines = text.split('\n');
+	const head = lines.slice(0, MAX_LINES).join('\n').slice(0, MAX_CHARS).trimEnd();
+	const truncated = head.length < text.length ? '\n…(truncated — wiki_home shows the full page)' : '';
+	return `Entry page ${homePath} (${pages.length} wiki pages in total):\n${head}${truncated}`;
 }
 
 /** Outgoing links, backlinks, and broken links for a single note. */

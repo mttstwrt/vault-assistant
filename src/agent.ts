@@ -2,8 +2,9 @@ import { App } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
 import { ApprovalRequest, ApprovalResult, ChatMessage, ToolCall } from './types';
 import { chatCompletion } from './api/client';
-import { TOOL_SPECS, ToolContext, executeTool } from './tools/vault-tools';
+import { ToolContext, activeToolSpecs, executeTool } from './tools/vault-tools';
 import { McpManager } from './mcp/manager';
+import { RagIndexer } from './rag/indexer';
 
 export interface AgentEvents {
 	onAssistant(content: string): void;
@@ -24,6 +25,7 @@ export async function runAgent(
 	settings: VaultAssistantSettings,
 	saveSettings: () => Promise<void>,
 	mcp: McpManager,
+	rag: RagIndexer,
 	sessionWrites: Set<string>,
 	sessionMcp: Set<string>,
 	history: ChatMessage[],
@@ -36,9 +38,10 @@ export async function runAgent(
 		sessionWrites,
 		sessionMcp,
 		mcp,
+		rag,
 		requestApproval: events.requestApproval,
 	};
-	const tools = [...TOOL_SPECS, ...mcp.toolSpecs()];
+	const tools = [...activeToolSpecs(settings), ...mcp.toolSpecs()];
 
 	for (let step = 0; step < settings.maxSteps; step++) {
 		let result;

@@ -3,7 +3,8 @@ import { VaultAssistantSettings } from '../settings';
 import { ApprovalRequest, ApprovalResult, ToolSpec } from '../types';
 import { displayScopes, isReadable, isWritable, parentFolder, writeScopes } from '../permissions';
 import { McpManager } from '../mcp/manager';
-import { buildWikiIndex, describeLinks } from './graph';
+import { RagIndexer } from '../rag/indexer';
+import { buildWikiIndex, describeLinks, wikiHomePath } from './graph';
 
 /** Everything a tool invocation needs: the app, settings, and the approval hooks. */
 export interface ToolContext {
@@ -17,6 +18,8 @@ export interface ToolContext {
 	sessionMcp: Set<string>;
 	/** Connected MCP servers and their tools. */
 	mcp: McpManager;
+	/** The semantic index behind the semantic_search tool. */
+	rag: RagIndexer;
 	/** Ask the user to approve a write outside the allowlist, or an MCP call. */
 	requestApproval: (req: ApprovalRequest) => Promise<ApprovalResult>;
 }
@@ -109,9 +112,40 @@ export const TOOL_SPECS: ToolSpec[] = [
 		},
 	},
 	{
+		name: 'wiki_home',
+		description:
+			"Read the wiki's Home page — the curated entry point / table of contents. This is the starting move for recalling curated knowledge: read Home, then follow its [[links]] toward the topic with wiki_page.",
+		parameters: { type: 'object', properties: {} },
+	},
+	{
+		name: 'wiki_page',
+		description:
+			'Read a wiki page by title, together with its neighbours (outgoing links, backlinks, broken links) in one call. Use it to hop through the wiki from Home toward a topic.',
+		parameters: {
+			type: 'object',
+			properties: {
+				title: { type: 'string', description: 'Wiki page title (the filename without .md).' },
+			},
+			required: ['title'],
+		},
+	},
+	{
+		name: 'semantic_search',
+		description:
+			'Embedding-based search over the indexed vault: finds notes about a concept even when the wording differs. Use it for fuzzy recall ("somewhere I wrote about…"), then read the note or wiki page it surfaces. For exact strings or filenames use search; for curated topics start at wiki_home.',
+		parameters: {
+			type: 'object',
+			properties: {
+				query: { type: 'string', description: 'What to look for, phrased naturally.' },
+				limit: { type: 'number', description: 'Max results (default from settings, max 20).' },
+			},
+			required: ['query'],
+		},
+	},
+	{
 		name: 'list_wiki',
 		description:
-			'List every existing wiki note and how it links to other notes and the rest of the vault. Call this before creating or updating wiki notes so the wiki grows coherently: extend and cross-link existing pages instead of duplicating them.',
+			'The wiki sitemap: every wiki note, how it links to other notes and the rest of the vault, and a maintenance worklist (orphan pages, broken links). Use it before creating pages and for curation — for recall, start at wiki_home instead.',
 		parameters: { type: 'object', properties: {} },
 	},
 	{
@@ -146,6 +180,11 @@ export const TOOL_SPECS: ToolSpec[] = [
 		},
 	},
 ];
+
+/** The built-in tool specs to offer the model, given the current settings. */
+export function activeToolSpecs(settings: VaultAssistantSettings): ToolSpec[] {
+	return settings.useRag ? TOOL_SPECS : TOOL_SPECS.filter((t) => t.name !== 'semantic_search');
+}
 
 /** Create a folder and any missing parents. */
 async function ensureFolder(app: App, folder: string): Promise<void> {
@@ -360,6 +399,35 @@ export async function executeTool(
 				}
 				await writeFile(ctx, 'remember', path, content);
 				return `Remembered (saved ${path}).`;
+			}
+
+			case 'wiki_home': {
+				const p = wikiHomePath(settings);
+				const f = app.vault.getAbstractFileByPath(p);
+				if (!(f instanceof TFile)) {
+					return `The wiki has no "${p}" page yet. Create it with update_wiki: a short, curated table of contents whose [[links]] lead to the top-level topics. Link every new wiki page into it.`;
+				}
+				return await app.vault.cachedRead(f);
+			}
+
+			case 'wiki_page': {
+				const title = sanitizeTitle(str(args.title));
+				if (!title) return 'Error: a wiki page title is required.';
+				const p = normalizePath(`${settings.wikiFolder}/${title}.md`);
+				const f = app.vault.getAbstractFileByPath(p);
+				if (!(f instanceof TFile)) {
+					return `Error: no wiki page "${title}". Check wiki_home or list_wiki for the pages that exist.`;
+				}
+				const content = await app.vault.cachedRead(f);
+				return `${content}\n\n---\n${describeLinks(app, settings, p)}`;
+			}
+
+			case 'semantic_search': {
+				if (!settings.useRag) return 'Error: semantic search is disabled in settings.';
+				const q = str(args.query).trim();
+				if (!q) return 'Error: a query is required.';
+				const limit = Math.min(Math.max(Number(args.limit) || settings.ragTopK, 1), 20);
+				return await ctx.rag.search(q, limit);
 			}
 
 			case 'list_wiki':

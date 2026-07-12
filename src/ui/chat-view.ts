@@ -221,6 +221,7 @@ export class ChatView extends ItemView {
 			this.plugin.settings,
 			() => this.plugin.saveSettings(),
 			this.plugin.mcp,
+			this.plugin.rag,
 			this.sessionWrites,
 			this.sessionMcp,
 			this.history,
