@@ -1,9 +1,16 @@
-import { ItemView, MarkdownRenderer, Notice, WorkspaceLeaf, setIcon } from 'obsidian';
+import { ItemView, Keymap, MarkdownRenderer, Notice, TFile, WorkspaceLeaf, setIcon } from 'obsidian';
 import type VaultAssistantPlugin from '../main';
 import { ApprovalRequest, ApprovalResult, ChatMessage, ToolCall } from '../types';
 import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
-import { newConversationPath, saveConversation } from '../conversation';
+import {
+	appendConversation,
+	newConversationPath,
+	parseConversation,
+	saveConversation,
+} from '../conversation';
+import { ConversationPicker } from './conversation-modal';
+import { ImportModal } from './import-modal';
 
 export const VIEW_TYPE_CHAT = 'vault-assistant-view';
 
@@ -11,6 +18,8 @@ export class ChatView extends ItemView {
 	private plugin: VaultAssistantPlugin;
 	private history: ChatMessage[] = [];
 	private conversationPath: string | null = null;
+	/** How many history entries are already saved in a reopened conversation's file. */
+	private persistedCount = 0;
 	private busy = false;
 
 	private messagesEl!: HTMLElement;
@@ -52,7 +61,45 @@ export class ChatView extends ItemView {
 		setIcon(newBtn, 'plus');
 		newBtn.onclick = () => void this.resetConversation();
 
+		const openBtn = header.createEl('button', {
+			cls: 'va-new',
+			attr: { 'aria-label': 'Open previous conversation' },
+		});
+		setIcon(openBtn, 'history');
+		openBtn.onclick = () =>
+			new ConversationPicker(this.app, this.plugin.settings.conversationsFolder, (f) =>
+				void this.openConversation(f),
+			).open();
+
+		const importBtn = header.createEl('button', {
+			cls: 'va-new',
+			attr: { 'aria-label': 'Import Claude Code conversations' },
+		});
+		setIcon(importBtn, 'import');
+		importBtn.onclick = () => new ImportModal(this.app, this.plugin).open();
+
 		this.messagesEl = root.createDiv({ cls: 'va-messages' });
+
+		// MarkdownRenderer marks [[wikilinks]] as internal links but custom views
+		// must handle navigation themselves — delegate clicks and hover previews.
+		this.messagesEl.addEventListener('click', (evt) => {
+			const link = (evt.target as HTMLElement).closest('a.internal-link');
+			if (!(link instanceof HTMLElement)) return;
+			evt.preventDefault();
+			const target = link.getAttr('data-href') ?? link.getAttr('href');
+			if (target) void this.app.workspace.openLinkText(target, '', Keymap.isModEvent(evt));
+		});
+		this.messagesEl.addEventListener('mouseover', (evt) => {
+			const link = (evt.target as HTMLElement).closest('a.internal-link');
+			if (!(link instanceof HTMLElement)) return;
+			this.app.workspace.trigger('hover-link', {
+				event: evt,
+				source: VIEW_TYPE_CHAT,
+				hoverParent: this,
+				targetEl: link,
+				linktext: link.getAttr('data-href') ?? '',
+			});
+		});
 
 		const inputRow = root.createDiv({ cls: 'va-input-row' });
 		this.inputEl = inputRow.createEl('textarea', {
@@ -82,11 +129,35 @@ export class ChatView extends ItemView {
 		const systemPrompt = await buildSystemPrompt(this.app, this.plugin.settings);
 		this.history = [{ role: 'system', content: systemPrompt }];
 		this.conversationPath = null;
+		this.persistedCount = 0;
 		this.toolEls.clear();
 		this.sessionWrites.clear();
 		this.sessionMcp.clear();
 		this.messagesEl.empty();
 		this.addInfo('New conversation. The agent can read and (within allowed folders) write your vault.');
+	}
+
+	/** Load a saved transcript back into the chat so it can be continued. */
+	private async openConversation(file: TFile): Promise<void> {
+		if (this.busy) {
+			new Notice('Wait for the current response to finish first.');
+			return;
+		}
+		this.cancelPendingApprovals();
+		const systemPrompt = await buildSystemPrompt(this.app, this.plugin.settings);
+		const messages = parseConversation(await this.app.vault.cachedRead(file));
+		this.history = [{ role: 'system', content: systemPrompt }, ...messages];
+		this.conversationPath = file.path;
+		this.persistedCount = this.history.length;
+		this.toolEls.clear();
+		this.sessionWrites.clear();
+		this.sessionMcp.clear();
+		this.messagesEl.empty();
+		this.addInfo(`Continuing "${file.basename}".`);
+		for (const m of messages) {
+			if (m.role === 'user') this.addUserBubble(m.content);
+			else if (m.role === 'assistant') await this.addAssistantBubble(m.content);
+		}
 	}
 
 	/** Resolve any approval prompts still awaiting a click as denials. */
@@ -239,12 +310,23 @@ export class ChatView extends ItemView {
 
 		if (this.plugin.settings.autoSaveConversations && this.conversationPath) {
 			try {
-				await saveConversation(
-					this.app,
-					this.plugin.settings,
-					this.conversationPath,
-					this.history,
-				);
+				if (this.persistedCount > 0) {
+					// Reopened conversation: append only the new turns, so the
+					// original file is preserved as saved.
+					await appendConversation(
+						this.app,
+						this.conversationPath,
+						this.history.slice(this.persistedCount),
+					);
+					this.persistedCount = this.history.length;
+				} else {
+					await saveConversation(
+						this.app,
+						this.plugin.settings,
+						this.conversationPath,
+						this.history,
+					);
+				}
 			} catch (e) {
 				new Notice(`Could not save conversation: ${e instanceof Error ? e.message : String(e)}`);
 			}

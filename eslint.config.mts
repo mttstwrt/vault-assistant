@@ -39,9 +39,10 @@ export default tseslint.config(
 		},
 	},
 	{
-		// The MCP stdio transport is desktop-only and deliberately uses Node's
-		// child_process and process/Buffer globals (guarded by Platform.isDesktopApp).
-		files: ['src/mcp/transport.ts'],
+		// The MCP stdio transport and the Claude Code importer are desktop-only
+		// and deliberately use Node's builtins and process/Buffer globals
+		// (guarded by Platform.isDesktopApp).
+		files: ['src/mcp/transport.ts', 'src/import/claude-code.ts'],
 		languageOptions: {
 			globals: {
 				...globals.node,

@@ -2,29 +2,27 @@ import { App, TFile, TFolder, moment, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
 import { ChatMessage } from './types';
 
-/** Build a stable file path for a new conversation from its first message. */
-export function newConversationPath(settings: VaultAssistantSettings, firstMessage: string): string {
-	const stamp = moment().format('YYYY-MM-DD HHmm');
-	const slug = firstMessage
+/** Sanitise a first message into a short filename-safe slug. */
+export function conversationSlug(firstMessage: string): string {
+	return firstMessage
 		.replace(/[\\/:*?"<>|#^[\]\n]/g, ' ')
 		.replace(/\s+/g, ' ')
 		.trim()
 		.slice(0, 40)
 		.trim();
+}
+
+/** Build a stable file path for a new conversation from its first message. */
+export function newConversationPath(settings: VaultAssistantSettings, firstMessage: string): string {
+	const stamp = moment().format('YYYY-MM-DD HHmm');
+	const slug = conversationSlug(firstMessage);
 	const name = slug ? `${stamp} ${slug}` : stamp;
 	return normalizePath(`${settings.conversationsFolder}/${name}.md`);
 }
 
-/** Render the transcript as readable markdown. */
-function renderConversation(messages: ChatMessage[]): string {
-	const lines: string[] = [
-		'---',
-		`created: ${moment().format('YYYY-MM-DD HH:mm')}`,
-		'tags: [ai-conversation]',
-		'---',
-		'',
-	];
-
+/** Render messages (no frontmatter) as readable markdown lines. */
+export function renderMessages(messages: ChatMessage[]): string[] {
+	const lines: string[] = [];
 	for (const m of messages) {
 		if (m.role === 'user') {
 			lines.push('## 🧑 You', '', m.content, '');
@@ -36,11 +34,60 @@ function renderConversation(messages: ChatMessage[]): string {
 		}
 		// `tool` result messages are intentionally omitted to keep transcripts clean.
 	}
+	return lines;
+}
 
+/** Render the transcript as readable markdown. */
+function renderConversation(messages: ChatMessage[]): string {
+	const lines: string[] = [
+		'---',
+		`created: ${moment().format('YYYY-MM-DD HH:mm')}`,
+		'tags: [ai-conversation]',
+		'---',
+		'',
+		...renderMessages(messages),
+	];
 	return lines.join('\n');
 }
 
-async function ensureFolder(app: App, folder: string): Promise<void> {
+/**
+ * Parse a saved transcript back into user/assistant messages so a previous
+ * conversation can be reopened. Tool-call records (`> 🔧 …`) are dropped —
+ * they aren't replayable without their results.
+ */
+export function parseConversation(md: string): ChatMessage[] {
+	let body = md;
+	if (body.startsWith('---\n')) {
+		const end = body.indexOf('\n---\n', 4);
+		if (end !== -1) body = body.slice(end + 5);
+	}
+
+	const messages: ChatMessage[] = [];
+	let role: 'user' | 'assistant' | null = null;
+	let buf: string[] = [];
+	const flush = (): void => {
+		if (!role) return;
+		const content = buf.join('\n').trim();
+		if (content) messages.push({ role, content });
+		buf = [];
+	};
+
+	for (const line of body.split('\n')) {
+		if (line.startsWith('## 🧑 You')) {
+			flush();
+			role = 'user';
+		} else if (line.startsWith('## 🤖 Assistant')) {
+			flush();
+			role = 'assistant';
+		} else if (!line.startsWith('> 🔧 `')) {
+			buf.push(line);
+		}
+	}
+	flush();
+	return messages;
+}
+
+export async function ensureFolder(app: App, folder: string): Promise<void> {
 	const parts = normalizePath(folder).split('/').filter(Boolean);
 	let cur = '';
 	for (const p of parts) {
@@ -72,4 +119,20 @@ export async function saveConversation(
 	} else if (!(existing instanceof TFolder)) {
 		await app.vault.create(path, md);
 	}
+}
+
+/**
+ * Append newly-added messages to an existing transcript. Used when continuing
+ * a reopened conversation, so the original file (including its old tool-call
+ * records) is preserved instead of being re-rendered from parsed history.
+ */
+export async function appendConversation(
+	app: App,
+	path: string,
+	messages: ChatMessage[],
+): Promise<void> {
+	const file = app.vault.getAbstractFileByPath(path);
+	if (!(file instanceof TFile)) throw new Error(`Conversation file not found: ${path}`);
+	const md = renderMessages(messages).join('\n');
+	if (md.trim()) await app.vault.append(file, `\n${md}`);
 }

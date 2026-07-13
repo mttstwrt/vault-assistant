@@ -8,6 +8,8 @@ It works with any **OpenAI-compatible** endpoint: local runners like **Ollama** 
 
 If you point the plugin at a remote endpoint, the contents of notes the agent reads are sent to that service. Use a local model (Ollama/LM Studio) to keep everything offline. If you enable **semantic search** (off by default), the notes being indexed are additionally sent to the embedding endpoint — use a local embedding model (e.g. `nomic-embed-text` on Ollama) to keep that offline too. Folders you block from reading are never indexed and never sent anywhere. The plugin makes no other network calls and has no telemetry.
 
+The optional **Claude Code import** (desktop only) reads session logs from your local `~/.claude/projects` directory — files outside your vault — but only when you explicitly run the import, and nothing it reads leaves your machine; it just writes cleaned transcripts into your conversations folder.
+
 ## Features
 
 - **Chat side panel** — open from the ribbon (bot icon) or the command **Vault assistant: Open chat**.
@@ -21,7 +23,8 @@ If you point the plugin at a remote endpoint, the contents of notes the agent re
   - `update_wiki` — create or expand an interlinked wiki note
   - `remember` — save a durable fact to the agent's operating memory
 - **Folder-scoped permissions** — decide exactly what the agent may read and write. By default it can read everything but write **nothing** except the conversations, wiki, and memory files, so your own notes stay untouched.
-- **Auto-saved conversations** — every chat is written to your conversations folder as a markdown note.
+- **Auto-saved conversations** — every chat is written to your conversations folder as a markdown note. Reopen any saved conversation from the panel's history button and keep talking; new turns are appended to the same note.
+- **Claude Code import (desktop)** — pull your local Claude Code sessions into the vault as clean transcripts (your messages plus the assistant's thinking and answers; tool calls and results are dropped), so they join your second brain: searchable, indexable, and continuable like any other conversation.
 - **Growing wiki** — the agent saves synthesised knowledge to a wiki folder using `[[wikilinks]]`, so a connected second brain builds up as you talk. A curated **Home** page is the table of contents: the agent starts there, follows links toward a topic, and links every new page back in. A compact pointer to Home is injected at session start so the agent knows what curated knowledge exists without loading any of it.
 - **Semantic search (opt-in)** — index your vault with any OpenAI-compatible embedding model and give the agent fuzzy, meaning-based recall alongside literal search. Optionally index the wiki (so semantic search lands on curated pages) and past conversations (filtered to your messages and the agent's final answers). The index lives in the plugin folder — never in your notes — updates incrementally as you edit, and strictly respects blocked folders.
 - **Operating memory** — a small, curated note (`AI/Memory.md` by default) injected into the agent at the start of every conversation. When you correct it ("habits live here now, not there") it records the fact with `remember`, so it stops relearning how your vault is organised. The wiki holds *what's in* your vault; memory holds *how it works*.

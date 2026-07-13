@@ -7,6 +7,7 @@ import {
 	LEGACY_SYSTEM_PROMPTS,
 } from './settings';
 import { ChatView, VIEW_TYPE_CHAT } from './ui/chat-view';
+import { ImportModal } from './ui/import-modal';
 import { McpManager } from './mcp/manager';
 import { RagIndexer } from './rag/indexer';
 
@@ -38,6 +39,12 @@ export default class VaultAssistantPlugin extends Plugin {
 			id: 'reindex-vault',
 			name: 'Reindex vault for semantic search',
 			callback: () => void this.reindexRag(),
+		});
+
+		this.addCommand({
+			id: 'import-claude-code',
+			name: 'Import Claude Code conversations',
+			callback: () => new ImportModal(this.app, this).open(),
 		});
 
 		this.addSettingTab(new VaultAssistantSettingTab(this.app, this));

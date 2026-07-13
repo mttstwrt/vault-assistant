@@ -222,3 +222,42 @@
 	font-size: var(--font-ui-smaller);
 	margin: 4px 0 8px;
 }
+
+/* --- Claude Code import modal --- */
+
+.va-import-desc {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.va-import-status:not(:empty) {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	margin: 4px 0 8px;
+}
+
+.va-import-list {
+	max-height: 40vh;
+	overflow-y: auto;
+}
+
+.va-import-row {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	padding: 4px 0;
+}
+
+.va-import-all {
+	border-bottom: 1px solid var(--background-modifier-border);
+	margin-bottom: 4px;
+}
+
+.va-import-label {
+	min-width: 0;
+}
+
+.va-import-meta {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
