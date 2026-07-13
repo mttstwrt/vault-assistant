@@ -1,7 +1,8 @@
-import { App, moment, normalizePath } from 'obsidian';
+import { App, TFile, moment, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from '../settings';
 import { ChatMessage } from '../types';
-import { conversationSlug, ensureFolder, renderMessages } from '../conversation';
+import { ensureFolder } from '../conversation';
+import { ImportOutcome, thinkingCallout, writeConversation } from './common';
 
 /**
  * Import Claude Code session logs (the .jsonl files under ~/.claude/projects)
@@ -24,8 +25,6 @@ export interface ClaudeSession {
 	/** First real user message, for the picker list. */
 	title: string;
 }
-
-export type ImportOutcome = 'imported' | 'skipped' | 'empty';
 
 function nodeFs(): typeof import('fs') {
 	// Lazy require so this module still loads on platforms without Node.
@@ -54,16 +53,6 @@ interface ContentBlock {
 	type?: string;
 	text?: string;
 	thinking?: string;
-}
-
-/** Render extended thinking as a collapsed callout so transcripts stay tidy. */
-function thinkingCallout(thinking: string): string {
-	const quoted = thinking
-		.trim()
-		.split('\n')
-		.map((l) => `> ${l}`)
-		.join('\n');
-	return `> [!quote]- Thinking\n${quoted}`;
 }
 
 /**
@@ -207,23 +196,121 @@ export async function importSession(
 	const firstUser = parsed.messages.find((m) => m.role === 'user');
 	if (!firstUser) return 'empty';
 
-	const when = moment(parsed.created ?? session.mtime);
-	const slug = conversationSlug(firstUser.content);
-	const dir = normalizePath(`${settings.conversationsFolder}/Claude Code/${session.project}`);
-	const path = normalizePath(`${dir}/${when.format('YYYY-MM-DD HHmm')}${slug ? ` ${slug}` : ''}.md`);
-	if (app.vault.getAbstractFileByPath(path)) return 'skipped';
+	return writeConversation(app, settings, {
+		source: 'claude-code',
+		folder: `Claude Code/${session.project}`,
+		title: firstUser.content,
+		created: parsed.created ?? session.mtime,
+		frontmatter: parsed.cwd ? [`project: "${parsed.cwd}"`] : [],
+		messages: parsed.messages,
+	});
+}
+
+/** One line of ~/.claude/history.jsonl: a prompt the user typed, with context. */
+export interface HistoryEntry {
+	display?: string;
+	project?: string;
+	sessionId?: string;
+	timestamp?: number;
+}
+
+export interface PromptHistory {
+	/** Prompts whose full session transcript no longer exists on disk. */
+	orphaned: HistoryEntry[];
+	total: number;
+}
+
+/**
+ * Read the prompt history (a sibling of the projects directory) and find the
+ * prompts that outlived their session files — Claude Code's cleanup deletes
+ * transcripts after ~30 days, but history.jsonl keeps the user's own prompts
+ * far longer. Those orphans are all that remains of expired conversations.
+ */
+export function scanPromptHistory(projectsDir: string): PromptHistory {
+	const fs = nodeFs();
+	const dir = projectsDir.replace(/\/+$/, '');
+	const historyPath = `${dir.split('/').slice(0, -1).join('/')}/history.jsonl`;
+	if (!fs.existsSync(historyPath)) return { orphaned: [], total: 0 };
+
+	const onDisk = new Set<string>();
+	for (const proj of fs.readdirSync(dir, { withFileTypes: true })) {
+		if (!proj.isDirectory()) continue;
+		for (const name of fs.readdirSync(`${dir}/${proj.name}`)) {
+			if (name.endsWith('.jsonl')) onDisk.add(name.slice(0, -'.jsonl'.length));
+		}
+	}
+
+	const orphaned: HistoryEntry[] = [];
+	let total = 0;
+	for (const line of fs.readFileSync(historyPath, 'utf8').split('\n')) {
+		if (!line.trim()) continue;
+		let e: HistoryEntry;
+		try {
+			e = JSON.parse(line) as HistoryEntry;
+		} catch {
+			continue;
+		}
+		if (!e.display?.trim()) continue;
+		total++;
+		if (!e.sessionId || !onDisk.has(e.sessionId)) orphaned.push(e);
+	}
+	return { orphaned, total };
+}
+
+/** Render the orphaned prompts as one note, grouped by project, oldest first. */
+export function renderPromptHistory(orphaned: HistoryEntry[]): string {
+	const byProject = new Map<string, HistoryEntry[]>();
+	for (const e of orphaned) {
+		const key = e.project ?? '(unknown project)';
+		let group = byProject.get(key);
+		if (!group) byProject.set(key, (group = []));
+		group.push(e);
+	}
 
 	const lines = [
 		'---',
-		`created: ${when.format('YYYY-MM-DD HH:mm')}`,
+		`updated: ${moment().format('YYYY-MM-DD HH:mm')}`,
 		'source: claude-code',
-		...(parsed.cwd ? [`project: "${parsed.cwd}"`] : []),
-		'tags: [ai-conversation, claude-code]',
+		'tags: [ai-conversation, claude-code, prompt-history]',
 		'---',
 		'',
-		...renderMessages(parsed.messages),
+		"Prompts rescued from Claude Code's prompt history (`history.jsonl`) whose full",
+		'session transcripts have already been cleaned up. Only your side of those',
+		'conversations survives. Regenerated in full on each import.',
+		'',
 	];
+	for (const [project, entries] of [...byProject.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
+		lines.push(`## ${project}`, '');
+		entries.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+		for (const e of entries) {
+			const stamp = e.timestamp ? moment(e.timestamp).format('YYYY-MM-DD HH:mm') : '(no date)';
+			const quoted = (e.display ?? '')
+				.trim()
+				.split('\n')
+				.map((l) => `> ${l}`)
+				.join('\n');
+			lines.push(`> **${stamp}**`, quoted, '');
+		}
+	}
+	return lines.join('\n');
+}
+
+/**
+ * Write (or refresh) the rescued-prompts note. Overwrites the previous
+ * version: history.jsonl only grows, so a regeneration never loses entries.
+ */
+export async function writePromptHistory(
+	app: App,
+	settings: VaultAssistantSettings,
+	orphaned: HistoryEntry[],
+): Promise<ImportOutcome> {
+	if (!orphaned.length) return 'empty';
+	const dir = normalizePath(`${settings.conversationsFolder}/Claude Code`);
+	const path = normalizePath(`${dir}/Prompt history.md`);
+	const md = renderPromptHistory(orphaned);
 	await ensureFolder(app, dir);
-	await app.vault.create(path, lines.join('\n'));
+	const existing = app.vault.getAbstractFileByPath(path);
+	if (existing instanceof TFile) await app.vault.modify(existing, md);
+	else await app.vault.create(path, md);
 	return 'imported';
 }

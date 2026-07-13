@@ -42,8 +42,8 @@ export default class VaultAssistantPlugin extends Plugin {
 		});
 
 		this.addCommand({
-			id: 'import-claude-code',
-			name: 'Import Claude Code conversations',
+			id: 'import-conversations',
+			name: 'Import conversations (Claude Code, claude.ai, ChatGPT)',
 			callback: () => new ImportModal(this.app, this).open(),
 		});
 

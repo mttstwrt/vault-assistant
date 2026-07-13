@@ -82,7 +82,7 @@ export class ChatView extends ItemView {
 
 		const importBtn = header.createEl('button', {
 			cls: 'va-new',
-			attr: { 'aria-label': 'Import Claude Code conversations' },
+			attr: { 'aria-label': 'Import conversations' },
 		});
 		setIcon(importBtn, 'import');
 		importBtn.onclick = () => new ImportModal(this.app, this.plugin).open();
