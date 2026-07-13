@@ -29,6 +29,8 @@ export interface ApprovalRequest {
 	/** The MCP server id/name behind the tool. MCP requests only. */
 	serverId?: string;
 	serverName?: string;
+	/** The call's JSON arguments, so the user sees exactly what is sent. MCP requests only. */
+	args?: string;
 }
 
 /** The user's decision on an {@link ApprovalRequest}. */

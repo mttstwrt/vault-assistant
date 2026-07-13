@@ -14,6 +14,15 @@ import { ImportModal } from './import-modal';
 
 export const VIEW_TYPE_CHAT = 'vault-assistant-view';
 
+/** Pretty-print a JSON string for display, falling back to the raw text. */
+function prettyJson(raw: string): string {
+	try {
+		return JSON.stringify(JSON.parse(raw), null, 2);
+	} catch {
+		return raw;
+	}
+}
+
 export class ChatView extends ItemView {
 	private plugin: VaultAssistantPlugin;
 	private history: ChatMessage[] = [];
@@ -181,6 +190,9 @@ export class ChatView extends ItemView {
 					text: `The agent wants to call an external MCP tool on "${req.serverName}":`,
 				});
 				card.createEl('code', { cls: 'va-approval-path', text: req.tool });
+				if (req.args && req.args !== '{}') {
+					card.createEl('pre', { cls: 'va-approval-args', text: prettyJson(req.args) });
+				}
 			} else {
 				card.createDiv({
 					cls: 'va-approval-body',

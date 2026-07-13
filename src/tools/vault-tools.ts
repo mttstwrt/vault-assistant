@@ -248,6 +248,7 @@ async function callMcp(ctx: ToolContext, name: string, argsJson: string): Promis
 			tool: name,
 			serverId: cfg.id,
 			serverName: cfg.name,
+			args: argsJson,
 		});
 		switch (decision) {
 			case 'once':
