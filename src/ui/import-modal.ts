@@ -1,4 +1,4 @@
-import { App, Modal, Notice, Platform, Setting, moment } from 'obsidian';
+import { App, ButtonComponent, Modal, Notice, Platform, Setting, moment } from 'obsidian';
 import type VaultAssistantPlugin from '../main';
 import { ImportOutcome, ImportedConversation, writeConversation } from '../import/common';
 import {
@@ -29,7 +29,7 @@ export class ImportModal extends Modal {
 	private sourceEl!: HTMLElement;
 	private listEl!: HTMLElement;
 	private statusEl!: HTMLElement;
-	private importBtn!: HTMLButtonElement;
+	private importBtn!: ButtonComponent;
 
 	constructor(app: App, plugin: VaultAssistantPlugin) {
 		super(app);
@@ -65,14 +65,22 @@ export class ImportModal extends Modal {
 		this.listEl = contentEl.createDiv({ cls: 'va-import-list' });
 
 		new Setting(contentEl).addButton((b) => {
-			this.importBtn = b.buttonEl;
+			this.importBtn = b;
 			b.setButtonText('Import selected')
 				.setCta()
-				.setDisabled(true)
 				.onClick(() => void this.runImport());
 		});
 
 		this.renderSourceControls();
+	}
+
+	/**
+	 * ButtonComponent's click handler bails on its internal disabled flag, so
+	 * that flag (not just the DOM attribute) must be kept in sync.
+	 */
+	private setImportEnabled(enabled: boolean): void {
+		this.importBtn.setDisabled(!enabled);
+		this.importBtn.buttonEl.toggleAttribute('disabled', !enabled);
 	}
 
 	/** Swap in the chosen source's controls and clear any previous results. */
@@ -175,7 +183,7 @@ export class ImportModal extends Modal {
 		this.items = items;
 		this.selected.clear();
 		this.listEl.empty();
-		this.importBtn.disabled = true;
+		this.setImportEnabled(false);
 		if (!items.length) return;
 
 		const rows: { box: HTMLInputElement; item: ImportItem }[] = [];
@@ -189,7 +197,7 @@ export class ImportModal extends Modal {
 				box.checked = allBox.checked;
 				if (allBox.checked) this.selected.add(item);
 			}
-			this.importBtn.disabled = this.selected.size === 0;
+			this.setImportEnabled(this.selected.size > 0);
 		};
 
 		for (const item of items) {
@@ -199,7 +207,7 @@ export class ImportModal extends Modal {
 			box.onchange = () => {
 				if (box.checked) this.selected.add(item);
 				else this.selected.delete(item);
-				this.importBtn.disabled = this.selected.size === 0;
+				this.setImportEnabled(this.selected.size > 0);
 			};
 			const label = row.createDiv({ cls: 'va-import-label' });
 			label.createDiv({ text: item.label });
@@ -208,7 +216,7 @@ export class ImportModal extends Modal {
 	}
 
 	private async runImport(): Promise<void> {
-		this.importBtn.disabled = true;
+		this.setImportEnabled(false);
 		const picked = this.items.filter((i) => this.selected.has(i));
 		let imported = 0;
 		let skipped = 0;
@@ -227,7 +235,7 @@ export class ImportModal extends Modal {
 		}.`;
 		this.statusEl.setText(summary);
 		new Notice(summary);
-		this.importBtn.disabled = this.selected.size === 0;
+		this.setImportEnabled(this.selected.size > 0);
 	}
 
 	onClose(): void {
