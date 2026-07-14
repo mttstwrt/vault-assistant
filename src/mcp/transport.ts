@@ -1,4 +1,4 @@
-import { requestUrl } from 'obsidian';
+import { App, requestUrl } from 'obsidian';
 import type { ChildProcess } from 'child_process';
 import { McpServerConfig } from '../settings';
 
@@ -19,8 +19,87 @@ interface JsonRpcResponse {
 }
 
 /** Build the right transport for a server config. */
-export function createTransport(cfg: McpServerConfig): McpTransport {
+export function createTransport(cfg: McpServerConfig, app: App): McpTransport {
+	if (cfg.transport === 'plugin') return new PluginTransport(cfg, app);
 	return cfg.transport === 'http' ? new HttpTransport(cfg) : new StdioTransport(cfg);
+}
+
+/** The tool-shaped API surface a co-installed plugin exposes (see life-tracker's src/api.ts). */
+interface PluginToolApi {
+	version: string;
+	toolDescriptors: Array<{
+		name: string;
+		description?: string;
+		inputSchema?: { properties?: Record<string, unknown>; required?: string[] };
+	}>;
+	invoke(name: string, args: Record<string, unknown>): Promise<string>;
+}
+
+/** The API major version this client understands. */
+const SUPPORTED_API_MAJOR = '1.';
+
+/**
+ * In-process "transport": tools come from another plugin's versioned `api`
+ * object instead of a separate server process. No JSON-RPC, works on mobile,
+ * and rides the same trust/approval flow as real MCP servers.
+ */
+class PluginTransport implements McpTransport {
+	constructor(
+		private cfg: McpServerConfig,
+		private app: App,
+	) {}
+
+	/** Resolve the target plugin's api fresh on every call, so enable/disable is honoured. */
+	private api(): PluginToolApi {
+		const id = this.cfg.pluginId;
+		if (!id) throw new Error('Plugin server has no pluginId configured.');
+		const registry = (
+			this.app as unknown as { plugins?: { plugins?: Record<string, { api?: PluginToolApi }> } }
+		).plugins?.plugins;
+		const api = registry?.[id]?.api;
+		if (!api) {
+			throw new Error(`Plugin "${id}" is not installed/enabled or exposes no api.`);
+		}
+		if (typeof api.version !== 'string' || !api.version.startsWith(SUPPORTED_API_MAJOR)) {
+			throw new Error(
+				`Plugin "${id}" api version "${String(api.version)}" is not compatible (need ${SUPPORTED_API_MAJOR}x).`,
+			);
+		}
+		return api;
+	}
+
+	async request(method: string, params?: unknown): Promise<unknown> {
+		if (method === 'initialize') {
+			this.api(); // throws with a useful message when unavailable
+			return {};
+		}
+		if (method === 'tools/list') {
+			return { tools: this.api().toolDescriptors };
+		}
+		if (method === 'tools/call') {
+			const p = (params ?? {}) as { name?: string; arguments?: Record<string, unknown> };
+			if (!p.name) throw new Error('tools/call needs a tool name.');
+			const text = await this.api().invoke(p.name, p.arguments ?? {});
+			// The api reports failures as {"error": ...} JSON; surface them as MCP errors.
+			let isError = false;
+			try {
+				const parsed: unknown = JSON.parse(text);
+				isError = !!parsed && typeof parsed === 'object' && 'error' in parsed;
+			} catch {
+				// Non-JSON output is fine — treat as plain text.
+			}
+			return { content: [{ type: 'text', text }], isError };
+		}
+		throw new Error(`Plugin transport does not support "${method}".`);
+	}
+
+	notify(): void {
+		// In-process: nothing to notify.
+	}
+
+	close(): void {
+		// In-process: nothing to tear down.
+	}
 }
 
 /** Pull the JSON-RPC payload out of a body that may be raw JSON or an SSE stream. */

@@ -223,6 +223,17 @@
 	margin: 4px 0 8px;
 }
 
+/* --- Research modal --- */
+
+.va-research-resume {
+	padding: 6px 8px;
+	border-radius: 6px;
+	cursor: pointer;
+}
+.va-research-resume:hover {
+	background: var(--background-modifier-hover);
+}
+
 /* --- Claude Code import modal --- */
 
 .va-import-desc {
@@ -272,4 +283,73 @@
 	overflow: auto;
 	white-space: pre-wrap;
 	word-break: break-word;
+}
+
+/* Workflow step preview (Run workflow modal) */
+.va-wf-steps {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	margin: 4px 0 12px;
+}
+
+.va-wf-step {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 8px 10px;
+	background: var(--background-primary-alt);
+}
+
+.va-wf-step-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	flex-wrap: wrap;
+}
+
+.va-wf-step-id {
+	font-weight: 600;
+	font-size: var(--font-ui-small);
+}
+
+.va-wf-badges {
+	display: flex;
+	gap: 4px;
+	flex-wrap: wrap;
+}
+
+.va-wf-badge {
+	font-size: var(--font-smallest);
+	color: var(--text-muted);
+	background: var(--background-modifier-hover);
+	border-radius: 4px;
+	padding: 1px 6px;
+	white-space: nowrap;
+}
+
+.va-wf-badge-ask {
+	color: var(--text-warning);
+}
+
+.va-wf-step-prompt {
+	margin-top: 4px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	line-height: 1.35;
+}
+
+.va-wf-arrow {
+	text-align: center;
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	line-height: 1;
+}
+
+.va-wf-loop {
+	margin-top: 4px;
+	text-align: center;
+	color: var(--text-faint);
+	font-size: var(--font-smallest);
+	font-style: italic;
 }

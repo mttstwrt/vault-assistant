@@ -24,7 +24,14 @@ export function parentFolder(path: string): string {
 
 /** Folders the agent's own working files always live in (always read+write). */
 function specialFolders(s: VaultAssistantSettings): string[] {
-	return [s.conversationsFolder, s.wikiFolder, s.memoryFile];
+	return [
+		s.conversationsFolder,
+		s.wikiFolder,
+		s.memoryFile,
+		s.researchFolder,
+		s.workflowsFolder,
+		s.goalsFile,
+	];
 }
 
 /** Folders the agent is allowed to write into. */

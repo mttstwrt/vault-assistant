@@ -1,4 +1,4 @@
-import { Notice, Platform } from 'obsidian';
+import { App, Notice, Platform } from 'obsidian';
 import { ToolSpec } from '../types';
 import { McpServerConfig, VaultAssistantSettings } from '../settings';
 import { McpTransport, createTransport } from './transport';
@@ -33,7 +33,7 @@ export class McpManager {
 	private tools = new Map<string, RegisteredTool>();
 
 	/** (Re)connect to every enabled server. Per-server failures are non-fatal. */
-	async connectAll(settings: VaultAssistantSettings): Promise<void> {
+	async connectAll(app: App, settings: VaultAssistantSettings): Promise<void> {
 		this.dispose();
 		for (const cfg of settings.mcpServers) {
 			if (!cfg.enabled) continue;
@@ -42,15 +42,15 @@ export class McpManager {
 				continue;
 			}
 			try {
-				await this.connectServer(cfg);
+				await this.connectServer(cfg, app);
 			} catch (e) {
 				new Notice(`MCP "${cfg.name}" failed: ${e instanceof Error ? e.message : String(e)}`);
 			}
 		}
 	}
 
-	private async connectServer(cfg: McpServerConfig): Promise<void> {
-		const transport = createTransport(cfg);
+	private async connectServer(cfg: McpServerConfig, app: App): Promise<void> {
+		const transport = createTransport(cfg, app);
 		try {
 			await transport.request('initialize', {
 				protocolVersion: PROTOCOL_VERSION,

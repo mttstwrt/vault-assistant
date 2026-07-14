@@ -1,19 +1,27 @@
 import { App, PluginSettingTab, Setting } from 'obsidian';
 import type VaultAssistantPlugin from './main';
+import { loadWorkflows } from './workflows/schema';
+import { WORKFLOW_PRESETS } from './workflows/presets';
 
-/** One configured MCP server. stdio uses command/args/env; http uses url/headers. */
+/**
+ * One configured MCP server. stdio uses command/args/env; http uses
+ * url/headers; plugin uses pluginId (another installed plugin's tool api,
+ * called in-process — no server, works on mobile).
+ */
 export interface McpServerConfig {
 	id: string;
 	name: string;
 	enabled: boolean;
 	/** Trusted servers' tools run without an approval prompt. */
 	trusted: boolean;
-	transport: 'stdio' | 'http';
+	transport: 'stdio' | 'http' | 'plugin';
 	command?: string;
 	args?: string[];
 	env?: Record<string, string>;
 	url?: string;
 	headers?: Record<string, string>;
+	/** Plugin id whose `api` exposes the tools (transport: 'plugin'). */
+	pluginId?: string;
 }
 
 export interface VaultAssistantSettings {
@@ -23,9 +31,15 @@ export interface VaultAssistantSettings {
 	model: string;
 	temperature: number;
 	maxSteps: number;
+	/** Merge extraBodyParams into every chat request (llama.cpp dynatemp etc.). */
+	useExtraBodyParams: boolean;
+	/** JSON object of extra request-body fields, e.g. {"dynatemp_range": 0.4}. */
+	extraBodyParams: string;
 
 	// --- Agent behaviour ---
 	systemPrompt: string;
+	/** Run a cheap query-expansion + vault-search pass before each new message. */
+	usePrePass: boolean;
 
 	// --- Folder permissions ---
 	readBlockPaths: string[];
@@ -44,6 +58,31 @@ export interface VaultAssistantSettings {
 	/** Inject a compact pointer to the wiki Home page at session start. */
 	useWikiIndex: boolean;
 
+	// --- Workflows ---
+	/** Where workflow-run notes (goal + round reports) live. Always writable. */
+	researchFolder: string;
+	/** Where workflow definition notes live. Always writable. */
+	workflowsFolder: string;
+	/** Default rounds budget offered when starting a run (0 = until stopped). */
+	researchDefaultRounds: number;
+	/** Default pause between rounds, in seconds. */
+	researchDefaultDelaySeconds: number;
+	/** The goals note workflows may reference via {{goalsFile}}. Always readable/writable. */
+	goalsFile: string;
+
+	// --- Scheduled runs ---
+	scheduleEnabled: boolean;
+	/** Workflow id to run on the schedule. */
+	scheduleWorkflowId: string;
+	/** Hours between scheduled runs. */
+	scheduleEveryHours: number;
+	/** Goal used when a scheduled run starts a fresh run note. */
+	scheduleGoal: string;
+	/** Epoch ms of the last scheduled run start (internal). */
+	lastScheduledRun: number;
+	/** Human-readable outcome of the last scheduled run (internal). */
+	lastScheduledOutcome: string;
+
 	// --- Semantic search (RAG) ---
 	/** Master opt-in: embeddings send note contents to the embed endpoint. */
 	useRag: boolean;
@@ -60,6 +99,8 @@ export interface VaultAssistantSettings {
 
 	// --- MCP ---
 	mcpServers: McpServerConfig[];
+	/** One-time seeding of the disabled Life Tracker plugin-server entry. */
+	seededLifeTrackerServer: boolean;
 }
 
 export const DEFAULT_SYSTEM_PROMPT = `You are an AI assistant embedded inside the user's Obsidian vault. You can read, search, and (only within permitted folders) write notes using the provided tools, the same way a coding agent works inside a code repository.
@@ -98,7 +139,10 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	model: 'llama3.1',
 	temperature: 0.7,
 	maxSteps: 12,
+	useExtraBodyParams: false,
+	extraBodyParams: '{\n  "dynatemp_range": 0.4,\n  "dynatemp_exponent": 1.0\n}',
 	systemPrompt: DEFAULT_SYSTEM_PROMPT,
+	usePrePass: false,
 	readBlockPaths: [],
 	writePaths: [],
 	conversationsFolder: 'AI/Conversations',
@@ -108,6 +152,18 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	memoryFile: 'AI/Memory.md',
 	wikiHomeNote: 'Home',
 	useWikiIndex: true,
+	researchFolder: 'AI/Research',
+	workflowsFolder: 'AI/Workflows',
+	researchDefaultRounds: 10,
+	researchDefaultDelaySeconds: 0,
+	goalsFile: 'AI/Goals.md',
+	scheduleEnabled: false,
+	scheduleWorkflowId: 'life-coach',
+	scheduleEveryHours: 24,
+	scheduleGoal:
+		'Act as my life coach: review my Life Tracker data against my goals in {{goalsFile}}, call out imbalances, and plan tomorrow.',
+	lastScheduledRun: 0,
+	lastScheduledOutcome: '',
 	useRag: false,
 	embedModel: 'nomic-embed-text',
 	embedBaseUrl: '',
@@ -116,6 +172,7 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	ragIndexWiki: false,
 	ragIndexConversations: false,
 	mcpServers: [],
+	seededLifeTrackerServer: false,
 };
 
 /** Parse a textarea of newline/comma-separated folders into a clean list. */
@@ -211,6 +268,61 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 					}
 				}),
 			);
+
+		new Setting(containerEl)
+			.setName('Prepare context before answering')
+			.setDesc(
+				'Before each of your messages, make one cheap model call to turn it into a few search queries, run them against the vault (semantic search when enabled, literal otherwise), and inject the top hits into the system prompt. Helps small local models ground their answers with fewer tool rounds, at the cost of one extra round-trip.',
+			)
+			.addToggle((t) =>
+				t.setValue(s.usePrePass).onChange(async (v) => {
+					s.usePrePass = v;
+					await this.save();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('Send extra request parameters')
+			.setDesc(
+				'Merge the JSON object below into every chat request. Lets you enable server-side samplers your endpoint supports — e.g. llama.cpp’s dynamic temperature (dynatemp_range) or mirostat. Ollama’s OpenAI-compatible route ignores these.',
+			)
+			.addToggle((t) =>
+				t.setValue(s.useExtraBodyParams).onChange(async (v) => {
+					s.useExtraBodyParams = v;
+					await this.save();
+					this.display();
+				}),
+			);
+
+		if (s.useExtraBodyParams) {
+			const paramsErr = containerEl.createDiv({ cls: 'va-settings-error' });
+			new Setting(containerEl)
+				.setName('Extra parameters (JSON object)')
+				.setDesc(
+					'Sent as top-level request-body fields. Cannot override model, messages, or tools.',
+				)
+				.addTextArea((t) => {
+					t.inputEl.rows = 5;
+					t.inputEl.addClass('va-wide-textarea');
+					t.setValue(s.extraBodyParams).onChange(async (v) => {
+						paramsErr.setText('');
+						s.extraBodyParams = v;
+						if (v.trim()) {
+							try {
+								const parsed: unknown = JSON.parse(v);
+								if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+									throw new Error('Expected a JSON object.');
+								}
+							} catch (e) {
+								paramsErr.setText(
+									`Invalid JSON (will be ignored): ${e instanceof Error ? e.message : String(e)}`,
+								);
+							}
+						}
+						await this.save();
+					});
+				});
+		}
 
 		new Setting(containerEl).setName('Folder permissions').setHeading();
 
@@ -336,6 +448,140 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 					await this.save();
 				}),
 			);
+
+		new Setting(containerEl).setName('Workflows').setHeading();
+
+		new Setting(containerEl)
+			.setName('Runs folder')
+			.setDesc(
+				'Where workflow-run notes (the goal plus each round’s report) are saved. Always writable.',
+			)
+			.addText((t) =>
+				t
+					.setPlaceholder('AI/Research')
+					.setValue(s.researchFolder)
+					.onChange(async (v) => {
+						s.researchFolder = v.trim();
+						await this.save();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Workflows folder')
+			.setDesc(
+				'Where workflow definition notes live. Notes here (with "steps" in frontmatter) appear in the workflow picker alongside the built-in presets. Always writable.',
+			)
+			.addText((t) =>
+				t
+					.setPlaceholder('AI/Workflows')
+					.setValue(s.workflowsFolder)
+					.onChange(async (v) => {
+						s.workflowsFolder = v.trim();
+						await this.save();
+					}),
+			);
+
+		new Setting(containerEl)
+			.setName('Default rounds per run')
+			.setDesc('Rounds budget suggested when starting a run. 0 = run until stopped.')
+			.addText((t) =>
+				t.setValue(String(s.researchDefaultRounds)).onChange(async (v) => {
+					const n = parseInt(v, 10);
+					if (!Number.isNaN(n) && n >= 0) {
+						s.researchDefaultRounds = n;
+						await this.save();
+					}
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('Default delay between rounds')
+			.setDesc('Seconds to pause between rounds, suggested when starting a run.')
+			.addText((t) =>
+				t.setValue(String(s.researchDefaultDelaySeconds)).onChange(async (v) => {
+					const n = parseInt(v, 10);
+					if (!Number.isNaN(n) && n >= 0) {
+						s.researchDefaultDelaySeconds = n;
+						await this.save();
+					}
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('Goals note')
+			.setDesc(
+				'The note workflows reference via {{goalsFile}} — the life coach reads it to know what you are working toward. Always readable and writable.',
+			)
+			.addText((t) =>
+				t
+					.setPlaceholder('AI/Goals.md')
+					.setValue(s.goalsFile)
+					.onChange(async (v) => {
+						s.goalsFile = v.trim();
+						await this.save();
+					}),
+			);
+
+		new Setting(containerEl).setName('Scheduled runs').setHeading();
+
+		new Setting(containerEl)
+			.setName('Run a workflow on a schedule')
+			.setDesc(
+				'While Obsidian is open, run the chosen workflow headlessly every N hours (one round per run), with a catch-up run shortly after startup when one was missed. Reports accumulate in a run note; you will get a notice when each run finishes. The model endpoint is called unattended — with a local model this is free; on a paid API, mind the cost.',
+			)
+			.addToggle((t) =>
+				t.setValue(s.scheduleEnabled).onChange(async (v) => {
+					s.scheduleEnabled = v;
+					await this.save();
+					this.display();
+				}),
+			);
+
+		if (s.scheduleEnabled) {
+			new Setting(containerEl).setName('Workflow to run').addDropdown((d) => {
+				const { workflows } = loadWorkflows(this.app, s, WORKFLOW_PRESETS);
+				for (const w of workflows) d.addOption(w.id, w.name);
+				if (!workflows.some((w) => w.id === s.scheduleWorkflowId)) {
+					d.addOption(s.scheduleWorkflowId, `${s.scheduleWorkflowId} (missing)`);
+				}
+				d.setValue(s.scheduleWorkflowId).onChange(async (v) => {
+					s.scheduleWorkflowId = v;
+					await this.save();
+				});
+			});
+
+			new Setting(containerEl)
+				.setName('Every (hours)')
+				.setDesc('24 = once a day.')
+				.addText((t) =>
+					t.setValue(String(s.scheduleEveryHours)).onChange(async (v) => {
+						const n = Number(v);
+						if (!Number.isNaN(n) && n >= 1) {
+							s.scheduleEveryHours = n;
+							await this.save();
+						}
+					}),
+				);
+
+			new Setting(containerEl)
+				.setName('Goal for scheduled runs')
+				.setDesc('Used when a scheduled run starts a fresh run note. {{goalsFile}} expands to your goals note path.')
+				.addTextArea((t) => {
+					t.inputEl.rows = 3;
+					t.inputEl.addClass('va-wide-textarea');
+					t.setValue(s.scheduleGoal).onChange(async (v) => {
+						s.scheduleGoal = v;
+						await this.save();
+					});
+				});
+
+			if (s.lastScheduledOutcome) {
+				containerEl.createDiv({
+					cls: 'va-rag-status',
+					text: `Last scheduled run: ${s.lastScheduledOutcome}`,
+				});
+			}
+		}
 
 		new Setting(containerEl).setName('Semantic search').setHeading();
 
@@ -469,7 +715,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Server definitions')
 			.setDesc(
-				'JSON array of MCP servers. Each: {"id","name","enabled":true,"trusted":false,"transport":"stdio","command":"npx","args":[...],"env":{}} or {"transport":"http","url":"https://…","headers":{}}. stdio servers run only on desktop. Trusted servers’ tools run without an approval prompt.',
+				'JSON array of MCP servers. Each: {"id","name","enabled":true,"trusted":false,"transport":"stdio","command":"npx","args":[...],"env":{}}, {"transport":"http","url":"https://…","headers":{}}, or {"transport":"plugin","pluginId":"obsidian-life-tracker"} (another installed plugin’s tool api, called in-process — works on mobile). stdio servers run only on desktop. Trusted servers’ tools run without an approval prompt.',
 			)
 			.addTextArea((t) => {
 				t.inputEl.rows = 8;

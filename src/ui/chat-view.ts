@@ -11,6 +11,9 @@ import {
 } from '../conversation';
 import { ConversationPicker } from './conversation-modal';
 import { ImportModal } from './import-modal';
+import { WorkflowModal, WorkflowStart } from './workflow-modal';
+import { WorkflowRun, createRunNote } from '../workflows/runner';
+import { prepareContext, stripPrePass } from '../prepass';
 
 export const VIEW_TYPE_CHAT = 'vault-assistant-view';
 
@@ -41,6 +44,8 @@ export class ChatView extends ItemView {
 	private sessionMcp = new Set<string>();
 	/** Resolvers for approval prompts awaiting a click, so we can cancel them. */
 	private pendingApprovals = new Set<(r: ApprovalResult) => void>();
+	/** The workflow run this panel is currently hosting, if any. */
+	private workflowRun: WorkflowRun | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: VaultAssistantPlugin) {
 		super(leaf);
@@ -87,6 +92,13 @@ export class ChatView extends ItemView {
 		setIcon(importBtn, 'import');
 		importBtn.onclick = () => new ImportModal(this.app, this.plugin).open();
 
+		const workflowBtn = header.createEl('button', {
+			cls: 'va-new',
+			attr: { 'aria-label': 'Run workflow' },
+		});
+		setIcon(workflowBtn, 'telescope');
+		workflowBtn.onclick = () => this.openWorkflowModal();
+
 		this.messagesEl = root.createDiv({ cls: 'va-messages' });
 
 		// MarkdownRenderer marks [[wikilinks]] as internal links but custom views
@@ -129,11 +141,16 @@ export class ChatView extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
+		this.workflowRun?.stop();
 		this.cancelPendingApprovals();
 		this.toolEls.clear();
 	}
 
 	private async resetConversation(): Promise<void> {
+		if (this.busy) {
+			new Notice('Wait for the current response to finish first.');
+			return;
+		}
 		this.cancelPendingApprovals();
 		const systemPrompt = await buildSystemPrompt(this.app, this.plugin.settings);
 		this.history = [{ role: 'system', content: systemPrompt }];
@@ -299,6 +316,15 @@ export class ChatView extends ItemView {
 		const thinking = this.messagesEl.createDiv({ cls: 'va-info va-thinking', text: 'Thinking…' });
 		this.scrollToBottom();
 
+		if (this.plugin.settings.usePrePass && this.history[0]?.role === 'system') {
+			thinking.setText('Preparing context…');
+			const block = await prepareContext(this.app, this.plugin.settings, this.plugin.rag, text);
+			// Replace any previous turn's block so pre-fetched context never piles up.
+			const base = stripPrePass(this.history[0].content);
+			this.history[0] = { role: 'system', content: block ? base + block : base };
+			thinking.setText('Thinking…');
+		}
+
 		await runAgent(
 			this.app,
 			this.plugin.settings,
@@ -343,5 +369,98 @@ export class ChatView extends ItemView {
 				new Notice(`Could not save conversation: ${e instanceof Error ? e.message : String(e)}`);
 			}
 		}
+	}
+
+	/** Open the workflow modal (also reachable via the "Run workflow" command). */
+	openWorkflowModal(preselectId?: string): void {
+		if (this.busy) {
+			new Notice('Wait for the current response to finish first.');
+			return;
+		}
+		new WorkflowModal(
+			this.app,
+			this.plugin,
+			(start) => void this.startWorkflow(start),
+			preselectId,
+		).open();
+	}
+
+	/** Host an autonomous workflow run in this panel until it pauses or finishes. */
+	async startWorkflow(start: WorkflowStart): Promise<void> {
+		if (this.busy) {
+			new Notice('Wait for the current response to finish first.');
+			return;
+		}
+		// The run builds its own per-round context; reset the panel so any chat
+		// afterwards starts from a clean conversation. The run's transcript is
+		// not saved as a conversation — the run note is the artifact.
+		await this.resetConversation();
+		this.messagesEl.empty();
+
+		let path: string;
+		try {
+			path = start.file
+				? start.file.path
+				: await createRunNote(this.app, this.plugin.settings, start.workflow, start.goal);
+		} catch (e) {
+			this.addError(`Could not start the run: ${e instanceof Error ? e.message : String(e)}`);
+			return;
+		}
+
+		const budget = start.maxRounds > 0 ? `${start.maxRounds} rounds` : 'until stopped';
+		this.addInfo(
+			start.file
+				? `Resuming "${start.file.basename}" with ${start.workflow.name} (${budget}).`
+				: `${start.workflow.name} (${budget}): ${start.goal}`,
+		);
+		this.addInfo(`Progress is saved to "${path}".`);
+
+		this.setRunBusy(true);
+		this.workflowRun = new WorkflowRun(
+			this.app,
+			this.plugin.settings,
+			() => this.plugin.saveSettings(),
+			this.plugin.mcp,
+			this.plugin.rag,
+			start.workflow,
+			{ path, maxRounds: start.maxRounds, delaySeconds: start.delaySeconds },
+			{
+				onAssistant: (c) => void this.addAssistantBubble(c),
+				onToolCall: (call) => this.addToolCall(call),
+				onToolResult: (call, res) => this.addToolResult(call, res),
+				onError: (msg) => this.addError(msg),
+				onInfo: (text) => {
+					this.addInfo(text);
+					this.scrollToBottom();
+				},
+				requestApproval: (req) => this.requestApproval(req),
+			},
+		);
+		try {
+			await this.workflowRun.run();
+		} catch (e) {
+			this.addError(`Run failed: ${e instanceof Error ? e.message : String(e)}`);
+		} finally {
+			this.workflowRun = null;
+			this.setRunBusy(false);
+		}
+	}
+
+	/** Toggle the run UI: input locked, Send becomes Stop. */
+	private setRunBusy(busy: boolean): void {
+		this.busy = busy;
+		this.inputEl.disabled = busy;
+		this.inputEl.placeholder = busy
+			? 'Workflow run in progress…'
+			: 'Ask about your vault…  (Enter to send, Shift+Enter for newline)';
+		this.sendBtn.disabled = false;
+		this.sendBtn.setText(busy ? 'Stop' : 'Send');
+		this.sendBtn.onclick = busy
+			? () => {
+					this.workflowRun?.stop();
+					this.sendBtn.disabled = true;
+					this.sendBtn.setText('Stopping…');
+				}
+			: () => void this.send();
 	}
 }

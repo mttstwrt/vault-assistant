@@ -94,6 +94,32 @@ export interface LLMResult {
 	toolCalls: ToolCall[];
 }
 
+/** Per-call sampling overrides (workflow steps set these; defaults come from settings). */
+export interface CallOverrides {
+	temperature?: number;
+	model?: string;
+}
+
+/** Fields the extra-params passthrough may never clobber. */
+const PROTECTED_BODY_KEYS = new Set(['model', 'messages', 'tools', 'tool_choice']);
+
+/** Parse the extra-body-params setting; invalid JSON is ignored with a warning. */
+function extraBodyParams(settings: VaultAssistantSettings): Record<string, unknown> {
+	if (!settings.useExtraBodyParams || !settings.extraBodyParams.trim()) return {};
+	try {
+		const parsed: unknown = JSON.parse(settings.extraBodyParams);
+		if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+		const out: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+			if (!PROTECTED_BODY_KEYS.has(k)) out[k] = v;
+		}
+		return out;
+	} catch (e) {
+		console.warn('[vault-assistant] Ignoring invalid extra request parameters:', e);
+		return {};
+	}
+}
+
 /**
  * One round-trip to an OpenAI-compatible /chat/completions endpoint.
  * Uses Obsidian's requestUrl so it works on mobile and bypasses CORS.
@@ -102,6 +128,7 @@ export async function chatCompletion(
 	settings: VaultAssistantSettings,
 	messages: ChatMessage[],
 	tools: ToolSpec[],
+	overrides: CallOverrides = {},
 ): Promise<LLMResult> {
 	const base = settings.baseUrl.replace(/\/+$/, '');
 	if (!base) throw new Error('No model base URL configured. Set one in settings.');
@@ -110,11 +137,14 @@ export async function chatCompletion(
 	const headers: Record<string, string> = { 'Content-Type': 'application/json' };
 	if (settings.apiKey.trim()) headers['Authorization'] = `Bearer ${settings.apiKey.trim()}`;
 
+	// Priority: per-call overrides > extra params > settings.
 	const body: Record<string, unknown> = {
-		model: settings.model,
-		messages: messages.map(toApiMessage),
 		temperature: settings.temperature,
+		...extraBodyParams(settings),
+		model: overrides.model ?? settings.model,
+		messages: messages.map(toApiMessage),
 	};
+	if (overrides.temperature !== undefined) body.temperature = overrides.temperature;
 	if (tools.length > 0) {
 		body.tools = tools.map((t) => ({ type: 'function', function: t }));
 		body.tool_choice = 'auto';
