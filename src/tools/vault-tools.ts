@@ -5,6 +5,7 @@ import { displayScopes, isReadable, isWritable, parentFolder, writeScopes } from
 import { McpManager } from '../mcp/manager';
 import { RagIndexer } from '../rag/indexer';
 import { buildWikiIndex, describeLinks, wikiHomePath } from './graph';
+import { describeOpenFiles } from './workspace';
 
 /** Everything a tool invocation needs: the app, settings, and the approval hooks. */
 export interface ToolContext {
@@ -149,6 +150,12 @@ export const TOOL_SPECS: ToolSpec[] = [
 		parameters: { type: 'object', properties: {} },
 	},
 	{
+		name: 'open_files',
+		description:
+			'See what the user currently has open in Obsidian: every open tab and which note is focused. Use it whenever the request is about the note in front of them rather than a named file — "what am I looking at", "summarise this", "add a task to this note" — then read_file the focused path. Notes in blocked folders are not listed.',
+		parameters: { type: 'object', properties: {} },
+	},
+	{
 		name: 'links',
 		description:
 			'Show the outgoing links and backlinks for a note, plus any broken links. Use it to understand how a note connects to others (including past conversations) before writing or linking.',
@@ -183,7 +190,10 @@ export const TOOL_SPECS: ToolSpec[] = [
 
 /** The built-in tool specs to offer the model, given the current settings. */
 export function activeToolSpecs(settings: VaultAssistantSettings): ToolSpec[] {
-	return settings.useRag ? TOOL_SPECS : TOOL_SPECS.filter((t) => t.name !== 'semantic_search');
+	const off = new Set<string>();
+	if (!settings.useRag) off.add('semantic_search');
+	if (!settings.useOpenFiles) off.add('open_files');
+	return off.size ? TOOL_SPECS.filter((t) => !off.has(t.name)) : TOOL_SPECS;
 }
 
 /** Create a folder and any missing parents. */
@@ -429,6 +439,13 @@ export async function executeTool(
 				if (!q) return 'Error: a query is required.';
 				const limit = Math.min(Math.max(Number(args.limit) || settings.ragTopK, 1), 20);
 				return await ctx.rag.search(q, limit);
+			}
+
+			case 'open_files': {
+				if (!settings.useOpenFiles) {
+					return 'Error: seeing what is open in Obsidian is disabled in settings.';
+				}
+				return describeOpenFiles(app, settings);
 			}
 
 			case 'list_wiki':

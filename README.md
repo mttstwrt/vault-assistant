@@ -6,7 +6,7 @@ It works with any **OpenAI-compatible** endpoint: local runners like **Ollama** 
 
 ## A note on privacy
 
-If you point the plugin at a remote endpoint, the contents of notes the agent reads are sent to that service. Use a local model (Ollama/LM Studio) to keep everything offline. If you enable **semantic search** (off by default), the notes being indexed are additionally sent to the embedding endpoint — use a local embedding model (e.g. `nomic-embed-text` on Ollama) to keep that offline too. Folders you block from reading are never indexed and never sent anywhere. The plugin makes no other network calls and has no telemetry. Note that a **workflow run** keeps calling your model endpoint unattended until it pauses or you stop it — on a paid API, set a rounds budget and keep an eye on cost.
+If you point the plugin at a remote endpoint, the contents of notes the agent reads are sent to that service. While **See what you have open** is enabled (the default), the *paths* of your open tabs are also sent with each message so the agent knows what you are looking at — paths inside blocked folders are excluded, and the setting turns the whole thing off. Use a local model (Ollama/LM Studio) to keep everything offline. If you enable **semantic search** (off by default), the notes being indexed are additionally sent to the embedding endpoint — use a local embedding model (e.g. `nomic-embed-text` on Ollama) to keep that offline too. Folders you block from reading are never indexed and never sent anywhere. The plugin makes no other network calls and has no telemetry. Note that a **workflow run** keeps calling your model endpoint unattended until it pauses or you stop it — on a paid API, set a rounds budget and keep an eye on cost.
 
 The optional **conversation import** processes everything locally and only when you explicitly run it: the Claude Code source (desktop only) reads session logs from your local `~/.claude` directory — files outside your vault — and the claude.ai/ChatGPT sources read only the export file you pick. Nothing the importer reads leaves your machine; it just writes cleaned transcripts into your conversations folder.
 
@@ -17,11 +17,13 @@ The optional **conversation import** processes everything locally and only when 
   - `list_files`, `read_file`, `search`
   - `semantic_search` — embedding-based recall (when semantic search is enabled)
   - `links` — outgoing links and backlinks for any note
+  - `open_files` — what you have open in Obsidian and which note is focused
   - `write_file`, `append_file` (writable folders only)
   - `wiki_home`, `wiki_page` — enter the wiki at its curated Home page and hop through it by `[[links]]`
   - `list_wiki` — the wiki sitemap (all pages, their links, orphans and broken links)
   - `update_wiki` — create or expand an interlinked wiki note
   - `remember` — save a durable fact to the agent's operating memory
+- **Knows what you're looking at** — the agent sees which notes are open in Obsidian and which one is focused, refreshed before every message you send. So "what am I looking at?", "summarise this", or "add a task to this note" just work, with no need to name the file (and it can re-check mid-answer with `open_files`). Open tabs in blocked folders are never listed; if the note you're focused on is blocked, the agent is told only that it can't see it, so it says so instead of answering about the wrong note. Turn the whole thing off with **See what you have open**.
 - **Folder-scoped permissions** — decide exactly what the agent may read and write. By default it can read everything but write **nothing** except the conversations, wiki, and memory files, so your own notes stay untouched.
 - **Auto-saved conversations** — every chat is written to your conversations folder as a markdown note. Reopen any saved conversation from the panel's history button and keep talking; new turns are appended to the same note.
 - **Conversation import** — bring past AI conversations into the vault as clean transcripts (your messages plus the assistant's thinking and answers; tool calls and noise are dropped), so they join your second brain: searchable, indexable, and continuable like any other conversation. Sources: local **Claude Code** sessions (desktop only) — including a "Prompt history" rescue of your prompts from sessions Claude Code has already cleaned up — plus **claude.ai** and **ChatGPT** data exports (unzip and pick `conversations.json`; no login needed, everything is processed locally).
@@ -55,6 +57,7 @@ The optional **conversation import** processes everything locally and only when 
 | Conversations folder | Where transcripts are saved (always writable). Default `AI/Conversations`. |
 | Wiki folder | Where the generated wiki lives (always writable). Default `AI/Wiki`. |
 | Auto-save conversations | Save each chat as you go. |
+| See what you have open | On by default. Tells the agent which notes are open and which is focused (and exposes `open_files`), so "this note" resolves without naming a file. Blocked folders are never listed. |
 
 **Operating memory**
 

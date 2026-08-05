@@ -14,6 +14,7 @@ import { ImportModal } from './import-modal';
 import { WorkflowModal, WorkflowStart } from './workflow-modal';
 import { WorkflowRun, createRunNote } from '../workflows/runner';
 import { prepareContext, stripPrePass } from '../prepass';
+import { buildOpenFilesBlock, stripOpenFiles } from '../tools/workspace';
 
 export const VIEW_TYPE_CHAT = 'vault-assistant-view';
 
@@ -316,13 +317,20 @@ export class ChatView extends ItemView {
 		const thinking = this.messagesEl.createDiv({ cls: 'va-info va-thinking', text: 'Thinking…' });
 		this.scrollToBottom();
 
-		if (this.plugin.settings.usePrePass && this.history[0]?.role === 'system') {
-			thinking.setText('Preparing context…');
-			const block = await prepareContext(this.app, this.plugin.settings, this.plugin.rag, text);
-			// Replace any previous turn's block so pre-fetched context never piles up.
-			const base = stripPrePass(this.history[0].content);
-			this.history[0] = { role: 'system', content: block ? base + block : base };
-			thinking.setText('Thinking…');
+		const system = this.history[0];
+		if (system?.role === 'system') {
+			// Both blocks are rebuilt from scratch each turn, so stale tabs and
+			// last turn's pre-fetched context never pile up. Order matters: the
+			// strippers cut from their marker to the end.
+			let content = stripOpenFiles(stripPrePass(system.content));
+			content += buildOpenFilesBlock(this.app, this.plugin.settings);
+			if (this.plugin.settings.usePrePass) {
+				thinking.setText('Preparing context…');
+				const block = await prepareContext(this.app, this.plugin.settings, this.plugin.rag, text);
+				if (block) content += block;
+				thinking.setText('Thinking…');
+			}
+			this.history[0] = { role: 'system', content };
 		}
 
 		await runAgent(

@@ -40,6 +40,12 @@ export interface VaultAssistantSettings {
 	systemPrompt: string;
 	/** Run a cheap query-expansion + vault-search pass before each new message. */
 	usePrePass: boolean;
+	/**
+	 * Tell the agent which notes are open and which one is focused (and expose
+	 * the open_files tool), so "this note" resolves without naming a file.
+	 * Blocked folders are never listed.
+	 */
+	useOpenFiles: boolean;
 
 	// --- Folder permissions ---
 	readBlockPaths: string[];
@@ -143,6 +149,7 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	extraBodyParams: '{\n  "dynatemp_range": 0.4,\n  "dynatemp_exponent": 1.0\n}',
 	systemPrompt: DEFAULT_SYSTEM_PROMPT,
 	usePrePass: false,
+	useOpenFiles: true,
 	readBlockPaths: [],
 	writePaths: [],
 	conversationsFolder: 'AI/Conversations',
@@ -384,6 +391,18 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.autoSaveConversations).onChange(async (v) => {
 					s.autoSaveConversations = v;
+					await this.save();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('See what you have open')
+			.setDesc(
+				'Let the agent see which notes are open in Obsidian and which one is focused, so "summarise this note" or "what am I looking at" work without naming a file. The list is refreshed before each of your messages, and the agent can re-check it with the open_files tool. Notes in blocked folders are never listed.',
+			)
+			.addToggle((t) =>
+				t.setValue(s.useOpenFiles).onChange(async (v) => {
+					s.useOpenFiles = v;
 					await this.save();
 				}),
 			);
