@@ -47,6 +47,17 @@ export default class VaultAssistantPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: 'stop-response',
+			name: 'Stop the current response',
+			checkCallback: (checking: boolean) => {
+				const view = this.app.workspace.getLeavesOfType(VIEW_TYPE_CHAT)[0]?.view;
+				if (!(view instanceof ChatView) || !view.isBusy()) return false;
+				if (!checking) view.stopResponse();
+				return true;
+			},
+		});
+
+		this.addCommand({
 			id: 'start-research',
 			name: 'Run workflow (research, presets…)',
 			callback: () => void this.openWorkflow(),

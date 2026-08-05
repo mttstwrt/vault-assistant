@@ -3,6 +3,7 @@ import { VaultAssistantSettings } from './settings';
 import { chatCompletion } from './api/client';
 import { RagIndexer } from './rag/indexer';
 import { isReadable } from './permissions';
+import { isStopped, untilStopped } from './stop';
 
 /**
  * Context pre-pass: before answering, expand the user's message into a few
@@ -25,25 +26,28 @@ export function stripPrePass(systemContent: string): string {
 
 /**
  * Build the pre-pass context block for `userMessage`, or null when nothing
- * useful was found. Never throws — a failed pre-pass degrades to a normal turn.
+ * useful was found. Never throws — a failed or stopped pre-pass degrades to a
+ * normal turn.
  */
 export async function prepareContext(
 	app: App,
 	settings: VaultAssistantSettings,
 	rag: RagIndexer,
 	userMessage: string,
+	signal?: AbortSignal,
 ): Promise<string | null> {
 	let queries: string[];
 	try {
-		queries = await extractQueries(settings, userMessage);
+		queries = await untilStopped(extractQueries(settings, userMessage), signal);
 	} catch (e) {
-		console.warn('[vault-assistant] pre-pass query extraction failed:', e);
+		if (!isStopped(e)) console.warn('[vault-assistant] pre-pass query extraction failed:', e);
 		return null;
 	}
 	if (queries.length === 0) return null;
 
 	const sections: string[] = [];
 	for (const q of queries.slice(0, 4)) {
+		if (signal?.aborted) return null;
 		let hits = '';
 		if (settings.useRag) {
 			try {

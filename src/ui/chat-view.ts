@@ -18,6 +18,8 @@ import { buildOpenFilesBlock, stripOpenFiles } from '../tools/workspace';
 
 export const VIEW_TYPE_CHAT = 'vault-assistant-view';
 
+const INPUT_PLACEHOLDER = 'Ask about your vault…  (Enter to send, Shift+Enter for newline)';
+
 /** Pretty-print a JSON string for display, falling back to the raw text. */
 function prettyJson(raw: string): string {
 	try {
@@ -47,6 +49,8 @@ export class ChatView extends ItemView {
 	private pendingApprovals = new Set<(r: ApprovalResult) => void>();
 	/** The workflow run this panel is currently hosting, if any. */
 	private workflowRun: WorkflowRun | null = null;
+	/** Aborts the chat turn in flight; set only while one is running. */
+	private stopper: AbortController | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: VaultAssistantPlugin) {
 		super(leaf);
@@ -126,11 +130,11 @@ export class ChatView extends ItemView {
 		const inputRow = root.createDiv({ cls: 'va-input-row' });
 		this.inputEl = inputRow.createEl('textarea', {
 			cls: 'va-input',
-			attr: { rows: '2', placeholder: 'Ask about your vault…  (Enter to send, Shift+Enter for newline)' },
+			attr: { rows: '2', placeholder: INPUT_PLACEHOLDER },
 		});
 		this.sendBtn = inputRow.createEl('button', { cls: 'va-send', text: 'Send' });
 
-		this.sendBtn.onclick = () => void this.send();
+		this.setBusy(false);
 		this.inputEl.addEventListener('keydown', (evt) => {
 			if (evt.key === 'Enter' && !evt.shiftKey) {
 				evt.preventDefault();
@@ -142,14 +146,35 @@ export class ChatView extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
+		this.stopper?.abort();
 		this.workflowRun?.stop();
 		this.cancelPendingApprovals();
 		this.toolEls.clear();
 	}
 
+	/** Whether a response or workflow run is currently in flight. */
+	isBusy(): boolean {
+		return this.busy;
+	}
+
+	/**
+	 * Interrupt whatever this panel is running — a chat turn or a workflow run.
+	 * The model call in flight is dropped and the loop unwinds at its next
+	 * boundary; work already done (tool results, saved notes) is kept.
+	 */
+	stopResponse(): void {
+		if (!this.busy) return;
+		this.stopper?.abort();
+		this.workflowRun?.stop();
+		// An approval card still awaiting a click would hold the turn open.
+		this.cancelPendingApprovals();
+		this.sendBtn.disabled = true;
+		this.sendBtn.setText('Stopping…');
+	}
+
 	private async resetConversation(): Promise<void> {
 		if (this.busy) {
-			new Notice('Wait for the current response to finish first.');
+			new Notice('Stop the current response first.');
 			return;
 		}
 		this.cancelPendingApprovals();
@@ -167,7 +192,7 @@ export class ChatView extends ItemView {
 	/** Load a saved transcript back into the chat so it can be continued. */
 	private async openConversation(file: TFile): Promise<void> {
 		if (this.busy) {
-			new Notice('Wait for the current response to finish first.');
+			new Notice('Stop the current response first.');
 			return;
 		}
 		this.cancelPendingApprovals();
@@ -294,10 +319,14 @@ export class ChatView extends ItemView {
 		this.scrollToBottom();
 	}
 
+	/** Send doubles as Stop while anything is running, so a turn is never a wait. */
 	private setBusy(busy: boolean): void {
 		this.busy = busy;
-		this.sendBtn.disabled = busy;
-		this.sendBtn.setText(busy ? 'Thinking…' : 'Send');
+		this.sendBtn.disabled = false;
+		this.sendBtn.setText(busy ? 'Stop' : 'Send');
+		this.sendBtn.toggleClass('va-stop', busy);
+		this.sendBtn.setAttr('aria-label', busy ? 'Stop the response' : 'Send message');
+		this.sendBtn.onclick = busy ? () => this.stopResponse() : () => void this.send();
 	}
 
 	private async send(): Promise<void> {
@@ -313,47 +342,63 @@ export class ChatView extends ItemView {
 			this.conversationPath = newConversationPath(this.plugin.settings, text);
 		}
 
+		const stopper = new AbortController();
+		this.stopper = stopper;
 		this.setBusy(true);
 		const thinking = this.messagesEl.createDiv({ cls: 'va-info va-thinking', text: 'Thinking…' });
 		this.scrollToBottom();
 
-		const system = this.history[0];
-		if (system?.role === 'system') {
-			// Both blocks are rebuilt from scratch each turn, so stale tabs and
-			// last turn's pre-fetched context never pile up. Order matters: the
-			// strippers cut from their marker to the end.
-			let content = stripOpenFiles(stripPrePass(system.content));
-			content += buildOpenFilesBlock(this.app, this.plugin.settings);
-			if (this.plugin.settings.usePrePass) {
-				thinking.setText('Preparing context…');
-				const block = await prepareContext(this.app, this.plugin.settings, this.plugin.rag, text);
-				if (block) content += block;
-				thinking.setText('Thinking…');
+		try {
+			const system = this.history[0];
+			if (system?.role === 'system') {
+				// Both blocks are rebuilt from scratch each turn, so stale tabs and
+				// last turn's pre-fetched context never pile up. Order matters: the
+				// strippers cut from their marker to the end.
+				let content = stripOpenFiles(stripPrePass(system.content));
+				content += buildOpenFilesBlock(this.app, this.plugin.settings);
+				if (this.plugin.settings.usePrePass) {
+					thinking.setText('Preparing context…');
+					const block = await prepareContext(
+						this.app,
+						this.plugin.settings,
+						this.plugin.rag,
+						text,
+						stopper.signal,
+					);
+					if (block) content += block;
+					thinking.setText('Thinking…');
+				}
+				this.history[0] = { role: 'system', content };
 			}
-			this.history[0] = { role: 'system', content };
+
+			await runAgent(
+				this.app,
+				this.plugin.settings,
+				() => this.plugin.saveSettings(),
+				this.plugin.mcp,
+				this.plugin.rag,
+				this.sessionWrites,
+				this.sessionMcp,
+				this.history,
+				{
+					onAssistant: (c) => void this.addAssistantBubble(c),
+					onToolCall: (call) => this.addToolCall(call),
+					onToolResult: (call, res) => this.addToolResult(call, res),
+					onError: (msg) => this.addError(msg),
+					requestApproval: (req) => this.requestApproval(req),
+				},
+				{ signal: stopper.signal },
+			);
+		} finally {
+			thinking.remove();
+			this.stopper = null;
+			this.setBusy(false);
 		}
 
-		await runAgent(
-			this.app,
-			this.plugin.settings,
-			() => this.plugin.saveSettings(),
-			this.plugin.mcp,
-			this.plugin.rag,
-			this.sessionWrites,
-			this.sessionMcp,
-			this.history,
-			{
-				onAssistant: (c) => void this.addAssistantBubble(c),
-				onToolCall: (call) => this.addToolCall(call),
-				onToolResult: (call, res) => this.addToolResult(call, res),
-				onError: (msg) => this.addError(msg),
-				requestApproval: (req) => this.requestApproval(req),
-			},
-		);
+		if (stopper.signal.aborted) this.addInfo('Response stopped.');
 
-		thinking.remove();
-		this.setBusy(false);
-
+		// The turn is saved either way: a stopped response still has whatever the
+		// agent said and did before the stop, and that belongs in the transcript.
 		if (this.plugin.settings.autoSaveConversations && this.conversationPath) {
 			try {
 				if (this.persistedCount > 0) {
@@ -382,7 +427,7 @@ export class ChatView extends ItemView {
 	/** Open the workflow modal (also reachable via the "Run workflow" command). */
 	openWorkflowModal(preselectId?: string): void {
 		if (this.busy) {
-			new Notice('Wait for the current response to finish first.');
+			new Notice('Stop the current response first.');
 			return;
 		}
 		new WorkflowModal(
@@ -396,7 +441,7 @@ export class ChatView extends ItemView {
 	/** Host an autonomous workflow run in this panel until it pauses or finishes. */
 	async startWorkflow(start: WorkflowStart): Promise<void> {
 		if (this.busy) {
-			new Notice('Wait for the current response to finish first.');
+			new Notice('Stop the current response first.');
 			return;
 		}
 		// The run builds its own per-round context; reset the panel so any chat
@@ -454,21 +499,10 @@ export class ChatView extends ItemView {
 		}
 	}
 
-	/** Toggle the run UI: input locked, Send becomes Stop. */
+	/** Toggle the run UI: input locked on top of the usual Send/Stop swap. */
 	private setRunBusy(busy: boolean): void {
-		this.busy = busy;
 		this.inputEl.disabled = busy;
-		this.inputEl.placeholder = busy
-			? 'Workflow run in progress…'
-			: 'Ask about your vault…  (Enter to send, Shift+Enter for newline)';
-		this.sendBtn.disabled = false;
-		this.sendBtn.setText(busy ? 'Stop' : 'Send');
-		this.sendBtn.onclick = busy
-			? () => {
-					this.workflowRun?.stop();
-					this.sendBtn.disabled = true;
-					this.sendBtn.setText('Stopping…');
-				}
-			: () => void this.send();
+		this.inputEl.placeholder = busy ? 'Workflow run in progress…' : INPUT_PLACEHOLDER;
+		this.setBusy(busy);
 	}
 }

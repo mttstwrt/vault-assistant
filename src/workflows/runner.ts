@@ -91,7 +91,7 @@ export async function createRunNote(
  * "done" can be resumed later with a fresh budget.
  */
 export class WorkflowRun {
-	private stopRequested = false;
+	private stopper = new AbortController();
 	private finishSummary: string | null = null;
 
 	constructor(
@@ -105,9 +105,13 @@ export class WorkflowRun {
 		private events: WorkflowEvents,
 	) {}
 
-	/** Request a stop; takes effect at the next model-call boundary. */
+	/** Request a stop: the model call in flight is dropped and the run winds up. */
 	stop(): void {
-		this.stopRequested = true;
+		this.stopper.abort();
+	}
+
+	private get stopRequested(): boolean {
+		return this.stopper.signal.aborted;
 	}
 
 	async run(): Promise<WorkflowOutcome> {
@@ -257,7 +261,7 @@ export class WorkflowRun {
 			},
 			{
 				extraTools: [this.finishTool()],
-				shouldStop: () => this.stopRequested,
+				signal: this.stopper.signal,
 				toolFilter: toolSet ? (name) => toolSet.has(name) : undefined,
 				maxSteps: step.maxSteps,
 				overrides: { temperature: step.temperature, model: step.model },

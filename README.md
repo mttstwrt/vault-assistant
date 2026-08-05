@@ -13,6 +13,7 @@ The optional **conversation import** processes everything locally and only when 
 ## Features
 
 - **Chat side panel** — open from the ribbon (bot icon) or the command **Vault assistant: Open chat**.
+- **Stop anytime** — while the agent is working, **Send** becomes **Stop** (also the command **Stop the current response**). It drops the model call in flight and ends the turn at the next step instead of waiting the answer out — useful when a local model is grinding, or the agent has clearly gone the wrong way. Whatever it already said and did is kept and saved, and you can just type the next message. The same button stops a workflow run.
 - **Vault-aware agent** — the model is given tools to explore your notes and ground its answers in them:
   - `list_files`, `read_file`, `search`
   - `semantic_search` — embedding-based recall (when semantic search is enabled)
