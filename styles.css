@@ -42,6 +42,11 @@
 	display: flex;
 	flex-direction: column;
 	gap: 10px;
+	/* Obsidian suppresses selection outside editors — answers must be
+	   selectable and copyable like any other text. */
+	user-select: text;
+	-webkit-user-select: text;
+	cursor: auto;
 }
 
 .va-msg {
@@ -50,11 +55,84 @@
 	gap: 4px;
 }
 
+.va-msg-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 6px;
+}
+
 .va-role {
 	font-size: var(--font-ui-smaller);
 	text-transform: uppercase;
 	letter-spacing: 0.04em;
 	color: var(--text-faint);
+}
+
+.va-copy {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	padding: 2px;
+	background: transparent;
+	box-shadow: none;
+	cursor: pointer;
+	color: var(--text-faint);
+	opacity: 0;
+	transition: opacity 100ms ease-in-out;
+}
+.va-msg:hover .va-copy,
+.va-copy:focus-visible {
+	opacity: 1;
+}
+.va-copy:hover {
+	color: var(--text-normal);
+}
+
+/* Answer text as it streams in, before it is re-rendered as markdown. */
+.va-streaming {
+	white-space: pre-wrap;
+}
+
+.va-stats {
+	font-size: var(--font-smallest);
+	color: var(--text-faint);
+}
+
+/* --- Thinking (reasoning) section --- */
+
+.va-think {
+	font-size: var(--font-ui-smaller);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 4px 8px;
+	color: var(--text-muted);
+}
+.va-think summary {
+	cursor: pointer;
+	list-style: none;
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+.va-think summary::-webkit-details-marker {
+	display: none;
+}
+.va-think-icon {
+	display: inline-flex;
+	vertical-align: middle;
+}
+.va-think-body {
+	margin: 6px 0 2px;
+	padding: 6px 8px;
+	border-left: 2px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	font-size: var(--font-smallest);
+	line-height: 1.45;
+	white-space: pre-wrap;
+	word-break: break-word;
+	max-height: 320px;
+	overflow: auto;
 }
 
 .va-content {
@@ -183,28 +261,47 @@
 	opacity: 0.75;
 }
 
+.va-status {
+	font-size: var(--font-ui-smaller);
+	font-style: italic;
+	color: var(--text-faint);
+	padding: 4px 10px 0;
+}
+
+.va-hidden {
+	display: none;
+}
+
 .va-input-row {
 	display: flex;
+	align-items: flex-end;
 	gap: 6px;
 	padding: 8px;
 	border-top: 1px solid var(--background-modifier-border);
 }
 
+/* Height is set from the content in JS; max-height caps the growth. */
 .va-input {
 	flex: 1 1 auto;
-	resize: vertical;
-	min-height: 2.4em;
-	max-height: 12em;
+	resize: none;
+	overflow-y: auto;
+	min-height: 2.2em;
+	max-height: 40vh;
 	font-size: var(--font-ui-small);
+	line-height: 1.4;
 }
 
 .va-send {
 	align-self: flex-end;
 	cursor: pointer;
+	white-space: nowrap;
 }
 .va-send:disabled {
 	opacity: 0.6;
 	cursor: default;
+}
+.va-send.va-stop {
+	color: var(--text-error);
 }
 
 .va-wide-textarea {

@@ -39,6 +39,16 @@ export default tseslint.config(
 		},
 	},
 	{
+		// Streaming needs `fetch`: Obsidian's requestUrl buffers the whole
+		// response, so it can neither report tokens as they arrive nor be
+		// aborted mid-answer. The agent falls back to requestUrl (see
+		// src/api/client.ts) whenever a stream cannot be opened.
+		files: ['src/api/stream.ts'],
+		rules: {
+			'no-restricted-globals': 'off',
+		},
+	},
+	{
 		// The MCP stdio transport and the Claude Code importer are desktop-only
 		// and deliberately use Node's builtins and process/Buffer globals
 		// (guarded by Platform.isDesktopApp).

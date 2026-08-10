@@ -12,7 +12,7 @@ The optional **conversation import** processes everything locally and only when 
 
 ## Features
 
-- **Chat side panel** — open from the ribbon (bot icon) or the command **Vault assistant: Open chat**.
+- **Chat side panel** — open from the ribbon (bot icon) or the command **Vault assistant: Open chat**. Answers **stream in** as they are written, with a collapsible **thinking** section for reasoning models that ticks while the model works and folds itself into "Thought for 4.2s" when the answer starts. **Ctrl+C** (or the Stop button, or the command **Stop the current response**) cuts a long answer off mid-sentence and keeps what you got. The composer **grows as you type** (up to 40% of the panel), all output is selectable and copyable — with a copy button on every message — and scrolling up detaches the view so you can read while the rest streams in. When the endpoint reports them, generation speed and token counts appear under the answer.
 - **Vault-aware agent** — the model is given tools to explore your notes and ground its answers in them:
   - `list_files`, `read_file`, `search`
   - `semantic_search` — embedding-based recall (when semantic search is enabled)
@@ -47,6 +47,8 @@ The optional **conversation import** processes everything locally and only when 
 | Temperature | Sampling temperature. |
 | Max tool steps | How many tool-call rounds the agent may take per message. |
 | Send extra request parameters | Optional. Merge a JSON object into every chat request to enable server-side samplers your endpoint supports — e.g. llama.cpp's dynamic temperature (`dynatemp_range`, `dynatemp_exponent`) or mirostat. llama.cpp's OpenAI-compatible server accepts these; Ollama's OpenAI route ignores them (use a Modelfile there instead). |
+| Stream responses | On by default. Shows the answer as it is written and lets you stop it mid-answer. Falls back to a single buffered request automatically if a stream can't be opened (some hosted APIs refuse in-app requests), so you can leave it on. |
+| Show thinking as it happens | On by default. Keeps the thinking section expanded while a reasoning model works. Turn it off to keep reasoning collapsed until you open it. |
 
 **Folder permissions**
 

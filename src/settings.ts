@@ -35,6 +35,10 @@ export interface VaultAssistantSettings {
 	useExtraBodyParams: boolean;
 	/** JSON object of extra request-body fields, e.g. {"dynatemp_range": 0.4}. */
 	extraBodyParams: string;
+	/** Stream answers token by token, so they can be read and interrupted early. */
+	streamResponses: boolean;
+	/** Keep the thinking section expanded while the model reasons. */
+	expandThinking: boolean;
 
 	// --- Agent behaviour ---
 	systemPrompt: string;
@@ -147,6 +151,8 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	maxSteps: 12,
 	useExtraBodyParams: false,
 	extraBodyParams: '{\n  "dynatemp_range": 0.4,\n  "dynatemp_exponent": 1.0\n}',
+	streamResponses: true,
+	expandThinking: true,
 	systemPrompt: DEFAULT_SYSTEM_PROMPT,
 	usePrePass: false,
 	useOpenFiles: true,
@@ -275,6 +281,33 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 					}
 				}),
 			);
+
+		new Setting(containerEl)
+			.setName('Stream responses')
+			.setDesc(
+				'Show the answer as it is written, and let you stop it mid-answer with the Stop button or Ctrl+C. Turn this off if your endpoint cannot stream — the plugin also falls back to a single request automatically when a stream cannot be opened.',
+			)
+			.addToggle((t) =>
+				t.setValue(s.streamResponses).onChange(async (v) => {
+					s.streamResponses = v;
+					await this.save();
+					this.display();
+				}),
+			);
+
+		if (s.streamResponses) {
+			new Setting(containerEl)
+				.setName('Show thinking as it happens')
+				.setDesc(
+					'Keep the thinking section expanded while a reasoning model works, then collapse it to "Thought for Ns" once the answer starts. Turn this off to keep it collapsed from the start. Either way you can open it anytime.',
+				)
+				.addToggle((t) =>
+					t.setValue(s.expandThinking).onChange(async (v) => {
+						s.expandThinking = v;
+						await this.save();
+					}),
+				);
+		}
 
 		new Setting(containerEl)
 			.setName('Prepare context before answering')
