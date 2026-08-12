@@ -2,9 +2,9 @@ import { App, TFile, TFolder, moment, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
 import { ChatMessage } from './types';
 
-/** Sanitise a first message into a short filename-safe slug. */
-export function conversationSlug(firstMessage: string): string {
-	return firstMessage
+/** Sanitise a title or first message into a short filename-safe slug. */
+export function conversationSlug(label: string): string {
+	return label
 		.replace(/[\\/:*?"<>|#^[\]\n]/g, ' ')
 		.replace(/\s+/g, ' ')
 		.trim()
@@ -12,12 +12,28 @@ export function conversationSlug(firstMessage: string): string {
 		.trim();
 }
 
-/** Build a stable file path for a new conversation from its first message. */
-export function newConversationPath(settings: VaultAssistantSettings, firstMessage: string): string {
+/**
+ * Build a file path for a new conversation: the date and time, then `label` —
+ * the model's suggested title, or the first message when there isn't one. A
+ * name already taken (same minute, same topic) gets a counter instead of
+ * overwriting the existing transcript.
+ */
+export function newConversationPath(
+	app: App,
+	settings: VaultAssistantSettings,
+	label: string,
+): string {
 	const stamp = moment().format('YYYY-MM-DD HHmm');
-	const slug = conversationSlug(firstMessage);
-	const name = slug ? `${stamp} ${slug}` : stamp;
-	return normalizePath(`${settings.conversationsFolder}/${name}.md`);
+	const slug = conversationSlug(label);
+	const base = slug ? `${stamp} ${slug}` : stamp;
+	const pathFor = (name: string): string =>
+		normalizePath(`${settings.conversationsFolder}/${name}.md`);
+
+	let path = pathFor(base);
+	for (let n = 2; app.vault.getAbstractFileByPath(path) && n < 100; n++) {
+		path = pathFor(`${base} (${n})`);
+	}
+	return path;
 }
 
 /** Render messages (no frontmatter) as readable markdown lines. */

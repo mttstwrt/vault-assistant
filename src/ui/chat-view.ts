@@ -14,6 +14,7 @@ import { ImportModal } from './import-modal';
 import { WorkflowModal, WorkflowStart } from './workflow-modal';
 import { WorkflowRun, createRunNote } from '../workflows/runner';
 import { prepareContext, stripPrePass } from '../prepass';
+import { suggestConversationTitle } from '../title';
 import { buildOpenFilesBlock, stripOpenFiles } from '../tools/workspace';
 import { AssistantTurn } from './assistant-turn';
 import { fitToContent } from './autogrow';
@@ -379,6 +380,35 @@ export class ChatView extends ItemView {
 		this.sendBtn.onclick = busy ? () => this.interrupt() : () => void this.send();
 	}
 
+	/**
+	 * Where this conversation's transcript goes. With conversation naming on,
+	 * one extra cheap model call turns the opening exchange into a title;
+	 * otherwise (and whenever that call is skipped or fails) the first message
+	 * is used, as before.
+	 */
+	private async newConversationPath(firstMessage: string, interrupted: boolean): Promise<string> {
+		let label = '';
+		// Don't spend a call right after the user hit Stop, or on a turn that
+		// produced nothing to name.
+		if (this.plugin.settings.nameConversations && !interrupted) {
+			const answer = this.lastAssistantContent();
+			if (answer) {
+				this.setStatus('Naming the conversation…');
+				label = await suggestConversationTitle(this.plugin.settings, firstMessage, answer);
+			}
+		}
+		return newConversationPath(this.app, this.plugin.settings, label || firstMessage);
+	}
+
+	/** The most recent assistant answer in this conversation, if any. */
+	private lastAssistantContent(): string {
+		for (let i = this.history.length - 1; i >= 0; i--) {
+			const m = this.history[i];
+			if (m?.role === 'assistant' && m.content.trim()) return m.content;
+		}
+		return '';
+	}
+
 	private async send(): Promise<void> {
 		if (this.busy) return;
 		const text = this.inputEl.value.trim();
@@ -389,10 +419,6 @@ export class ChatView extends ItemView {
 		this.history.push({ role: 'user', content: text });
 		addUserBubble(this.messagesEl, text);
 		this.scrollToBottom(true);
-
-		if (!this.conversationPath) {
-			this.conversationPath = newConversationPath(this.plugin.settings, text);
-		}
 
 		const abort = new AbortController();
 		this.abort = abort;
@@ -459,6 +485,12 @@ export class ChatView extends ItemView {
 		}
 
 		if (abort.signal.aborted && !stopShown) addInfo(this.messagesEl, 'Stopped.');
+
+		// Name the file once, from the opening exchange — the answer says what
+		// the conversation turned out to be about better than the question does.
+		if (this.plugin.settings.autoSaveConversations && !this.conversationPath) {
+			this.conversationPath = await this.newConversationPath(text, abort.signal.aborted);
+		}
 
 		this.abort = null;
 		this.setStatus(null);

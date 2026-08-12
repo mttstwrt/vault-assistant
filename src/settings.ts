@@ -57,6 +57,8 @@ export interface VaultAssistantSettings {
 	conversationsFolder: string;
 	wikiFolder: string;
 	autoSaveConversations: boolean;
+	/** Let the model title each saved conversation (one extra cheap call per chat). */
+	nameConversations: boolean;
 
 	// --- Operating memory ---
 	useMemory: boolean;
@@ -161,6 +163,7 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	conversationsFolder: 'AI/Conversations',
 	wikiFolder: 'AI/Wiki',
 	autoSaveConversations: true,
+	nameConversations: true,
 	useMemory: true,
 	memoryFile: 'AI/Memory.md',
 	wikiHomeNote: 'Home',
@@ -425,8 +428,23 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 				t.setValue(s.autoSaveConversations).onChange(async (v) => {
 					s.autoSaveConversations = v;
 					await this.save();
+					this.display();
 				}),
 			);
+
+		if (s.autoSaveConversations) {
+			new Setting(containerEl)
+				.setName('Let the model name conversations')
+				.setDesc(
+					'After the first exchange, make one cheap model call to title the conversation, and save it as "2026-08-12 1432 Reworking the RAG chunker". Turn this off to name files after your first message instead, with no extra call.',
+				)
+				.addToggle((t) =>
+					t.setValue(s.nameConversations).onChange(async (v) => {
+						s.nameConversations = v;
+						await this.save();
+					}),
+				);
+		}
 
 		new Setting(containerEl)
 			.setName('See what you have open')
