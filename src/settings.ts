@@ -1,7 +1,19 @@
-import { App, PluginSettingTab, Setting } from 'obsidian';
+import { App, PluginSettingTab, Setting, TextComponent } from 'obsidian';
 import type VaultAssistantPlugin from './main';
+import { filterModels, listModels, modelLabel } from './api/models';
 import { loadWorkflows } from './workflows/schema';
 import { WORKFLOW_PRESETS } from './workflows/presets';
+
+/** The two model fields that can be filled from a discovered list. */
+type PickerKind = 'chat' | 'embed';
+
+/**
+ * One spelling per endpoint, so a trailing slash doesn't look like a different
+ * server when caching what it serves.
+ */
+function canonicalUrl(url: string): string {
+	return url.trim().replace(/\/+$/, '');
+}
 
 /**
  * One configured MCP server. stdio uses command/args/env; http uses
@@ -211,10 +223,130 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		await this.plugin.saveSettings();
 	};
 
+	/** Models each endpoint advertised, kept for as long as this tab lives. */
+	private discovered = new Map<string, string[]>();
+	/** Why an endpoint has no list to offer ('' once it has one). */
+	private discoveryState = new Map<string, string>();
+	/** Endpoints with a request in flight, so a redraw doesn't fire another. */
+	private discovering = new Set<string>();
+	/** The live redraw for each picker, so a finished lookup can refresh it. */
+	private pickers = new Map<PickerKind, () => void>();
+
+	/**
+	 * Offer the models an endpoint advertises, as a dropdown once there is more
+	 * than one. Discovery runs when the settings tab is opened; editing the URL
+	 * doesn't re-run it (that would fire a request per keystroke), so the
+	 * refresh button next to the field is the way to look again.
+	 */
+	private renderModelPicker(
+		container: HTMLElement,
+		kind: PickerKind,
+		opts: {
+			endpoint: () => { url: string; key: string };
+			current: () => string;
+			apply: (id: string) => Promise<void>;
+		},
+	): void {
+		const render = (): void => {
+			container.empty();
+			const { url: configured, key } = opts.endpoint();
+			const url = canonicalUrl(configured);
+			if (!url) return;
+
+			if (!this.discovered.has(url) && !this.discoveryState.has(url)) {
+				this.discover(url, key);
+			}
+
+			const models = filterModels(this.discovered.get(url) ?? [], kind);
+			const current = opts.current();
+
+			if (models.length > 1) {
+				new Setting(container)
+					.setName(kind === 'chat' ? 'Available models' : 'Available embedding models')
+					.setDesc(`${models.length} models detected at ${url}.`)
+					.addDropdown((d) => {
+						// Keep a hand-typed name selectable, so picking from the
+						// list is never a one-way door.
+						if (!models.includes(current)) {
+							d.addOption(current, current ? `${current} (typed)` : '(not set)');
+						}
+						for (const id of models) d.addOption(id, modelLabel(id));
+						d.setValue(current).onChange(async (v) => {
+							await opts.apply(v);
+							render();
+						});
+					});
+			} else if (models.length === 1) {
+				const only = models[0] ?? '';
+				const row = new Setting(container)
+					.setName(kind === 'chat' ? 'Available model' : 'Available embedding model')
+					.setDesc(`The endpoint serves one model: ${only}`);
+				if (only !== current) {
+					row.addButton((b) =>
+						b.setButtonText('Use it').onClick(async () => {
+							await opts.apply(only);
+							render();
+						}),
+					);
+				}
+			}
+
+			const state = this.discoveryState.get(url);
+			if (state) container.createDiv({ cls: 'va-rag-status', text: state });
+		};
+
+		this.pickers.set(kind, render);
+		render();
+	}
+
+	/**
+	 * Look up one endpoint's models, then redraw the pickers. Both pickers are
+	 * redrawn because they often share an endpoint — the embeddings fields
+	 * default to the chat endpoint — and one lookup answers for both.
+	 */
+	private discover(url: string, key: string): void {
+		if (this.discovering.has(url)) return;
+		this.discovering.add(url);
+		this.discoveryState.set(url, 'Looking for available models…');
+		void listModels(url, key)
+			.then((ids) => {
+				this.discovered.set(url, ids);
+				this.discoveryState.set(
+					url,
+					ids.length ? '' : 'The endpoint reported no models — type the name instead.',
+				);
+			})
+			.catch((e: unknown) => {
+				this.discoveryState.set(
+					url,
+					`Could not list models: ${e instanceof Error ? e.message : String(e)}. Type the name instead.`,
+				);
+			})
+			.finally(() => {
+				this.discovering.delete(url);
+				this.redrawPickers();
+			});
+	}
+
+	/** Forget what an endpoint said and ask it again (the refresh button). */
+	private rediscover(configured: string): void {
+		const url = canonicalUrl(configured);
+		this.discovered.delete(url);
+		this.discoveryState.delete(url);
+		this.redrawPickers();
+	}
+
+	private redrawPickers(): void {
+		for (const render of this.pickers.values()) render();
+	}
+
 	display(): void {
 		const { containerEl } = this;
 		const s = this.plugin.settings;
 		containerEl.empty();
+		// Every picker below is rebuilt; drop the previous redraws with their
+		// now-detached containers.
+		this.pickers.clear();
 
 		new Setting(containerEl).setName('Model endpoint').setHeading();
 
@@ -246,18 +378,35 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 					});
 			});
 
+		let modelText: TextComponent | null = null;
 		new Setting(containerEl)
 			.setName('Model')
-			.setDesc('Model name as your endpoint expects it.')
-			.addText((t) =>
-				t
-					.setPlaceholder('llama3.1')
+			.setDesc('Model name as your endpoint expects it. Detected models are offered below.')
+			.addText((t) => {
+				modelText = t;
+				t.setPlaceholder('llama3.1')
 					.setValue(s.model)
 					.onChange(async (v) => {
 						s.model = v.trim();
 						await this.save();
-					}),
+					});
+			})
+			.addExtraButton((b) =>
+				b
+					.setIcon('refresh-cw')
+					.setTooltip('Detect models from the endpoint')
+					.onClick(() => this.rediscover(s.baseUrl)),
 			);
+
+		this.renderModelPicker(containerEl.createDiv(), 'chat', {
+			endpoint: () => ({ url: s.baseUrl, key: s.apiKey }),
+			current: () => s.model,
+			apply: async (id) => {
+				s.model = id;
+				modelText?.setValue(id);
+				await this.save();
+			},
+		});
 
 		new Setting(containerEl)
 			.setName('Temperature')
@@ -669,18 +818,38 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 			);
 
 		if (s.useRag) {
+			let embedText: TextComponent | null = null;
 			new Setting(containerEl)
 				.setName('Embedding model')
 				.setDesc('e.g. nomic-embed-text (Ollama) or text-embedding-3-small (OpenAI).')
-				.addText((t) =>
-					t
-						.setPlaceholder('nomic-embed-text')
+				.addText((t) => {
+					embedText = t;
+					t.setPlaceholder('nomic-embed-text')
 						.setValue(s.embedModel)
 						.onChange(async (v) => {
 							s.embedModel = v.trim();
 							await this.save();
-						}),
+						});
+				})
+				.addExtraButton((b) =>
+					b
+						.setIcon('refresh-cw')
+						.setTooltip('Detect models from the embeddings endpoint')
+						.onClick(() => this.rediscover(s.embedBaseUrl || s.baseUrl)),
 				);
+
+			this.renderModelPicker(containerEl.createDiv(), 'embed', {
+				endpoint: () => ({
+					url: s.embedBaseUrl || s.baseUrl,
+					key: s.embedApiKey || s.apiKey,
+				}),
+				current: () => s.embedModel,
+				apply: async (id) => {
+					s.embedModel = id;
+					embedText?.setValue(id);
+					await this.save();
+				},
+			});
 
 			new Setting(containerEl)
 				.setName('Embedding base URL')
