@@ -1,4 +1,14 @@
-import { ItemView, Keymap, Notice, TFile, WorkspaceLeaf, setIcon } from 'obsidian';
+import {
+	ItemView,
+	Keymap,
+	Notice,
+	Platform,
+	TFile,
+	ViewStateResult,
+	WorkspaceLeaf,
+	WorkspaceWindow,
+	setIcon,
+} from 'obsidian';
 import type VaultAssistantPlugin from '../main';
 import { ApprovalRequest, ApprovalResult, ChatMessage, ToolCall } from '../types';
 import { runAgent } from '../agent';
@@ -62,6 +72,10 @@ export class ChatView extends ItemView {
 	private turn: AssistantTurn | null = null;
 	/** False once the user scrolls up, so streaming output stops yanking the view. */
 	private followOutput = true;
+	/** True once onOpen has built the panel, so setState knows whether to wait. */
+	private mounted = false;
+	/** A transcript setState asked for before the panel existed. */
+	private pendingPath: string | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: VaultAssistantPlugin) {
 		super(leaf);
@@ -107,6 +121,17 @@ export class ChatView extends ItemView {
 		});
 		setIcon(importBtn, 'import');
 		importBtn.onclick = () => new ImportModal(this.app, this.plugin).open();
+
+		// Popout windows are a desktop feature, and there is nothing to pop out
+		// of once the panel is already in its own window.
+		if (Platform.isDesktopApp && !this.inPopoutWindow()) {
+			const popBtn = header.createEl('button', {
+				cls: 'va-new',
+				attr: { 'aria-label': 'Move chat to a new window' },
+			});
+			setIcon(popBtn, 'picture-in-picture-2');
+			popBtn.onclick = () => this.popOut();
+		}
 
 		const workflowBtn = header.createEl('button', {
 			cls: 'va-new',
@@ -174,6 +199,12 @@ export class ChatView extends ItemView {
 			this.interrupt();
 		});
 
+		this.mounted = true;
+		// Continue the conversation this panel was showing before it moved
+		// windows (or before Obsidian restarted); otherwise start fresh.
+		const pending = this.pendingPath;
+		this.pendingPath = null;
+		if (pending && (await this.loadConversationPath(pending))) return;
 		await this.resetConversation();
 	}
 
@@ -190,6 +221,68 @@ export class ChatView extends ItemView {
 	/** True while a message or workflow run is in flight. */
 	isBusy(): boolean {
 		return this.busy;
+	}
+
+	/** Whether this panel is already living in its own window. */
+	private inPopoutWindow(): boolean {
+		try {
+			return this.leaf.getContainer() instanceof WorkspaceWindow;
+		} catch {
+			// A leaf with no container yet is, by definition, not in a popout.
+			return false;
+		}
+	}
+
+	/**
+	 * Move the panel into its own window. Obsidian rebuilds the view there, so
+	 * the conversation travels as view state (see getState/setState) and is read
+	 * back from its saved transcript.
+	 */
+	private popOut(): void {
+		if (this.busy) {
+			this.busyNotice();
+			return;
+		}
+		// The transcript is what travels, so without one the new window starts
+		// a fresh conversation. Say so rather than silently dropping it.
+		if (!this.plugin.settings.autoSaveConversations && this.history.length > 1) {
+			new Notice('Auto-save is off, so this conversation cannot follow the panel to a new window.');
+		}
+		try {
+			this.app.workspace.moveLeafToPopout(this.leaf);
+		} catch (e) {
+			new Notice(`Could not open a new window: ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+
+	/**
+	 * Remember which transcript is open, so the conversation survives being
+	 * moved to another window (and comes back when Obsidian restores the
+	 * workspace). Only the path travels — the transcript itself stays in the
+	 * vault instead of being copied into workspace.json.
+	 */
+	getState(): Record<string, unknown> {
+		return { ...super.getState(), conversationPath: this.conversationPath };
+	}
+
+	async setState(state: unknown, result: ViewStateResult): Promise<void> {
+		await super.setState(state, result);
+		const path = (state as { conversationPath?: unknown } | null)?.conversationPath;
+		if (typeof path !== 'string' || !path || path === this.conversationPath) return;
+		// State can arrive before the panel is built; onOpen picks it up then.
+		if (!this.mounted) {
+			this.pendingPath = path;
+			return;
+		}
+		await this.loadConversationPath(path);
+	}
+
+	/** Open the transcript at `path`, if it is still there. */
+	private async loadConversationPath(path: string): Promise<boolean> {
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (!(file instanceof TFile)) return false;
+		await this.openConversation(file);
+		return true;
 	}
 
 	/** Stop the streaming answer, or the workflow run, in progress. */
