@@ -164,3 +164,179 @@ One honest caveat: extracting the pure-markdown tools (wiki, memory, RAG) into a
 shared module with no Obsidian imports would make them testable in CI *and*
 server-ready later, at low cost. That's worth doing regardless of which way this
 decision goes.
+
+---
+
+# Part 2: hosting, headless, and "why not just install one"
+
+Follow-up questions: (a) does doing *both* make sense, (b) why host an MCP server
+out of this plugin rather than installing one of the several on the community
+store, and (c) can a vault MCP server run with Obsidian closed — e.g. on an
+always-on home-lab box, so a voice request can file a note.
+
+## The measurement that decides all three
+
+The entire tool layer touches **ten vault operations**:
+
+```
+17  vault.getAbstractFileByPath      3  vault.getMarkdownFiles
+ 7  vault.cachedRead                 2  vault.createFolder
+ 5  vault.modify                     2  vault.create
+ 3  vault.read                       1  vault.append
+ 2  vault.adapter                    1  vault.getRoot
+```
+
+Plus exactly two Obsidian-only dependencies, each isolated to one file:
+
+- `metadataCache.resolvedLinks` / `unresolvedLinks` — 5 call sites, all in
+  `src/tools/graph.ts`.
+- `workspace.*` — 5 call sites, all in `src/tools/workspace.ts`.
+
+And `src/permissions.ts` — the access protocol itself — is 64 lines whose only
+Obsidian import is `normalizePath`.
+
+So the protocol is **already portable**; only the host isn't. A `VaultAdapter`
+interface of ~10 methods lets the same tool code and the same permission
+enforcement run in three places. That is what makes "both" cheap, and it is the
+reason to host your own rather than adopt someone else's.
+
+## (a) Yes — but factor once, adapt three times
+
+Don't write two servers. Extract a core with zero `obsidian` imports:
+
+```
+core/            permissions, tool specs + descriptions, wiki/memory
+                 conventions, executeTool over a VaultAdapter interface
+adapters/
+  obsidian.ts    VaultAdapter backed by app.vault  (+ metadataCache, workspace)
+  node.ts        VaultAdapter backed by node:fs    (+ a link resolver)
+hosts/
+  plugin-ui      chat view, workflows, pre-pass, scheduler   [unchanged]
+  plugin-mcp     MCP endpoint inside Obsidian, desktop-only
+  headless-mcp   MCP server on the home-lab, always on
+```
+
+Three hosts, one protocol. The chat UI and workflow runner sit on the same core
+and don't care that a second host exists. Feature parity stops being a
+maintenance problem because there is only one implementation of "what a tool
+means and who may call it."
+
+Tool availability differs per host, and that is fine — it's the existing
+`activeToolSpecs` pattern, one level up:
+
+| Tool group | Plugin UI | In-Obsidian MCP | Headless MCP |
+| --- | --- | --- | --- |
+| files, search, wiki, memory | ✅ | ✅ | ✅ |
+| `semantic_search` | ✅ | ✅ | ✅ (own index) |
+| `links` | ✅ cache | ✅ cache | ⚠️ reimplemented |
+| `open_files` | ✅ | ✅ | ❌ n/a |
+| workflows, pre-pass | ✅ | ❌ | ❌ |
+
+## (b) Why host it here instead of installing one
+
+The community options are real and several are mature — MCP Tools, Local REST
+API, MCP Server, Semantic Notes Vault MCP, MCP Connector, and more via BRAT. The
+question isn't quality, it's whether they can enforce *your* protocol.
+
+What you actually enforce is four layers deep:
+
+1. Reads: default-allow, minus a blocklist, with agent folders always readable.
+2. Writes: default-**deny**, except an allowlist plus the agent's own folders.
+3. Escalation: per-call approval with `once` / `session` / `always-file` /
+   `always-folder`, persisted back into settings.
+4. Semantics: `update_wiki`'s linking discipline, `remember` vs. `update_wiki`,
+   wiki-home-first retrieval — encoded in the tool *descriptions*.
+
+Generic servers offer roughly "the vault," or at best a folder list. Of the ones
+I checked, MCP Tools documents no folder-level restriction and no per-call
+approval at all. And layer 4 isn't a permission in the first place — no config
+file makes a generic `write_note` tool garden a wiki. Your `update_wiki`
+description does that, and it only travels if you ship the tool.
+
+**The sharper argument is that adding one actively voids the protocol.** Two MCP
+servers with vault write access means two permission models, and the weakest one
+wins. Point Claude Code at both `vault-assistant` and a generic server, and the
+model will use whichever call succeeds — your default-deny becomes decorative
+while a `write_file` next door writes anywhere. If you keep your protocol, a
+second write-capable vault server is not a complement; it's a bypass.
+
+**Decision rule:** install an existing one if it can enforce your protocol *at
+the server boundary* — not via client-side allowlists, which the model's client
+controls and which vary per agent platform. If none can, host your own. Based on
+what's documented, none can.
+
+Worth taking from them regardless: Local REST API's auth model (bearer token,
+loopback binding, self-signed TLS) is the battle-tested shape for this. Copy it
+rather than inventing one.
+
+## (c) Headless is the strongest part of the idea
+
+A vault is a folder of markdown. Most of the tool layer is filesystem work, so
+yes — a server on the always-on box gives agents vault access with Obsidian
+closed, on any device, over voice.
+
+**Survives the move unchanged:** all of `permissions.ts`; `list_files`,
+`read_file`, `search`, `write_file`, `append_file`; every wiki and memory tool —
+they're markdown conventions, not API calls.
+
+**Improves:** `semantic_search`. The index currently rebuilds only while Obsidian
+runs; on the server it can index continuously, with more CPU and no UI to block.
+
+**Lost, but costs nothing:** `open_files`. Meaningless when Obsidian isn't
+running.
+
+**The one real engineering cost:** `links`. You'd reimplement Obsidian's
+resolution — shortest-path-when-possible, frontmatter aliases, `|display`,
+`#heading`, `^block`, and unresolved-link detection. A few hundred lines, and the
+failure mode is silent disagreement with Obsidian rather than an error. Ship it
+with tests, which the headless side finally makes possible.
+
+### The hazard that actually matters: writing into a synced vault
+
+An agent writing `Daily/2026-08-18.md` on the server while your laptop has that
+note open with unsaved changes is a genuine data-loss path. Behaviour varies —
+Obsidian Sync prompts, Syncthing leaves `.sync-conflict-*` files, LiveSync
+merges — and none are good. Four mitigations, in order of value:
+
+1. **Give the headless host a tighter write allowlist than the in-app one.** Same
+   protocol, different scope: `Inbox/`, `AI/Conversations/`, maybe `AI/Wiki/` —
+   never daily notes or project notes. `writePaths` already expresses this;
+   it just needs to be per-host.
+2. **Prefer new files over edits.** Voice capture → a timestamped note in an
+   inbox folder. Filenames never collide; nothing merges.
+3. **Prefer `append_file` over `write_file`.** Appends to distinct regions
+   survive most sync merges; whole-file rewrites don't.
+4. **Do not let the two hosts share `rag-index.json`.** `RagStore.save` writes
+   the whole index as one `JSON.stringify` blob. If `.obsidian/plugins/` is in
+   your sync scope, two writers will silently clobber each other. Exclude it from
+   sync, or give the headless server its own index path.
+
+### Two notes on the voice flow
+
+An always-on server with vault write access needs a bearer token and should sit
+behind Tailscale/WireGuard rather than a forwarded port — write access to your
+notes is a broader capability than it looks, and prompt injection from note
+contents is a live concern once an agent both reads and writes unattended.
+
+And routing voice through Claude means note contents leave the home-lab. That may
+be a trade you've already accepted for Claude Code; it's worth making deliberately
+rather than by default, given llama.cpp is in the stack specifically for privacy.
+A local model on the same box keeps the whole loop inside the network.
+
+## Revised recommendation
+
+Do both, in this order:
+
+1. **Extract the core** (no `obsidian` imports) behind a `VaultAdapter`. This is
+   the prerequisite for everything else, it's cheap at ~10 operations, and it
+   makes the protocol testable in CI for the first time.
+2. **Headless MCP server on the home-lab**, with its own tighter write allowlist
+   and its own index. Highest payoff: always-on access, Claude Code and opencode
+   with your protocol instead of their generic filesystem tools, and the voice
+   flow.
+3. **In-Obsidian MCP endpoint**, later and optional. Only worth it for the two
+   things the headless host can't do — `open_files` and cache-accurate `links` —
+   which matter when Obsidian is open and you're working alongside the agent.
+4. **Keep the plugin UI as-is.** It remains the only place workflows, the
+   pre-pass, per-step sampling, and in-vault transcripts exist. Nothing about
+   hosting MCP threatens it.
