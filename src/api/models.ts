@@ -6,6 +6,7 @@
  * implement it are no worse off — the model name stays a text field.
  */
 import { requestUrl } from 'obsidian';
+import { describeRequestError, directRequest, withDirectRetry } from './node-http';
 
 interface ModelsResponse {
 	data?: Array<{ id?: string }>;
@@ -21,15 +22,26 @@ export async function listModels(baseUrl: string, apiKey: string): Promise<strin
 	const headers: Record<string, string> = {};
 	if (apiKey.trim()) headers['Authorization'] = `Bearer ${apiKey.trim()}`;
 
-	const res = await requestUrl({ url: `${base}/models`, method: 'GET', headers, throw: false });
+	const url = `${base}/models`;
+	const res = await withDirectRetry(
+		url,
+		async () => {
+			const r = await requestUrl({ url, method: 'GET', headers, throw: false });
+			return { status: r.status, text: r.text ?? '' };
+		},
+		() => directRequest({ url, method: 'GET', headers }),
+	).catch((e: unknown) => {
+		throw new Error(describeRequestError(e, url));
+	});
+
 	if (res.status >= 400) {
-		const detail = (res.text ?? '').trim().slice(0, 120);
+		const detail = res.text.trim().slice(0, 120);
 		throw new Error(`the endpoint answered ${res.status}${detail ? ` (${detail})` : ''}`);
 	}
 
 	let json: ModelsResponse;
 	try {
-		json = res.json as ModelsResponse;
+		json = JSON.parse(res.text) as ModelsResponse;
 	} catch {
 		throw new Error('the endpoint did not return a model list');
 	}

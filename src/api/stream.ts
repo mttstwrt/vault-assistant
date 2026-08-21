@@ -12,6 +12,7 @@
 import { ChatMessage, ToolCall, ToolSpec } from '../types';
 import { VaultAssistantSettings } from '../settings';
 import { ThinkTagSplitter } from './reasoning';
+import { canRetryDirect, directRequest, isOfflineError } from './node-http';
 import {
 	ApiTimings,
 	ApiUsage,
@@ -76,21 +77,9 @@ export async function streamChatCompletion(
 	signal?: AbortSignal,
 ): Promise<LLMResult> {
 	const { url, headers } = chatEndpoint(settings);
-	const body = chatRequestBody(settings, messages, tools, overrides, true);
+	const body = JSON.stringify(chatRequestBody(settings, messages, tools, overrides, true));
+	const requestHeaders = { ...headers, Accept: 'text/event-stream' };
 	const startedAt = Date.now();
-
-	const res = await fetch(url, {
-		method: 'POST',
-		headers: { ...headers, Accept: 'text/event-stream' },
-		body: JSON.stringify(body),
-		signal,
-	});
-
-	if (!res.ok) {
-		const detail = (await res.text().catch(() => '')).slice(0, 500);
-		throw new Error(`API error ${res.status}: ${detail}`);
-	}
-	if (!res.body) throw new Error('The endpoint returned no response body to stream.');
 
 	const splitter = new ThinkTagSplitter();
 	const calls = new Map<number, PartialToolCall>();
@@ -143,32 +132,26 @@ export async function streamChatCompletion(
 		}
 	};
 
-	const reader = res.body.getReader();
-	const decoder = new TextDecoder();
-	let buf = '';
-	try {
-		for (;;) {
-			const { done, value } = await reader.read();
-			if (done) break;
-			buf += decoder.decode(value, { stream: true });
+	const events = new SseBuffer(handleChunk);
+	/** Nothing decoded yet means a retry can safely start over. */
+	const started = (): boolean => !!content || !!reasoning || calls.size > 0;
 
-			// SSE events are separated by a blank line; a line may be split
-			// across reads, so only complete events are consumed here.
-			let cut = buf.indexOf('\n\n');
-			while (cut !== -1) {
-				const event = buf.slice(0, cut);
-				buf = buf.slice(cut + 2);
-				if (readEvent(event, handleChunk)) return finish();
-				cut = buf.indexOf('\n\n');
-			}
+	try {
+		try {
+			await readViaFetch(url, requestHeaders, body, events, signal);
+		} catch (e) {
+			// Chromium refuses every request while the OS reports no network,
+			// even to a server on this machine. Try the socket directly.
+			if (isAbort(e, signal) || started() || !canRetryDirect(url) || !isOfflineError(e)) throw e;
+			console.warn(
+				`[vault-assistant] The system reports no network; streaming from ${url} directly instead.`,
+				e,
+			);
+			await readDirect(url, requestHeaders, body, events, signal);
 		}
-		// Some endpoints end the stream without a trailing blank line.
-		if (buf.trim()) readEvent(buf, handleChunk);
 	} catch (e) {
 		if (!isAbort(e, signal)) throw e;
 		aborted = true;
-	} finally {
-		await reader.cancel().catch(() => undefined);
 	}
 
 	return finish();
@@ -193,6 +176,93 @@ export async function streamChatCompletion(
 			aborted: aborted || signal?.aborted === true,
 		};
 	}
+}
+
+/**
+ * Reassembles server-sent events from however the transport hands over the
+ * body: events are separated by a blank line, and a single event can be split
+ * across reads.
+ */
+class SseBuffer {
+	private buf = '';
+	private done = false;
+
+	constructor(private onChunk: (chunk: StreamChunk) => void) {}
+
+	/** Feed decoded text. Returns false once the terminator has been seen. */
+	push(text: string): boolean {
+		if (this.done) return false;
+		this.buf += text;
+		let cut = this.buf.indexOf('\n\n');
+		while (cut !== -1) {
+			const event = this.buf.slice(0, cut);
+			this.buf = this.buf.slice(cut + 2);
+			if (readEvent(event, this.onChunk)) {
+				this.done = true;
+				return false;
+			}
+			cut = this.buf.indexOf('\n\n');
+		}
+		return true;
+	}
+
+	/** Some endpoints end the stream without a trailing blank line. */
+	flush(): void {
+		if (!this.done && this.buf.trim()) readEvent(this.buf, this.onChunk);
+		this.buf = '';
+	}
+}
+
+/** Read the body through Chromium (the usual path: works with any endpoint). */
+async function readViaFetch(
+	url: string,
+	headers: Record<string, string>,
+	body: string,
+	events: SseBuffer,
+	signal?: AbortSignal,
+): Promise<void> {
+	const res = await fetch(url, { method: 'POST', headers, body, signal });
+	if (!res.ok) {
+		const detail = (await res.text().catch(() => '')).slice(0, 500);
+		throw new Error(`API error ${res.status}: ${detail}`);
+	}
+	if (!res.body) throw new Error('The endpoint returned no response body to stream.');
+
+	const reader = res.body.getReader();
+	const decoder = new TextDecoder();
+	try {
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			if (!events.push(decoder.decode(value, { stream: true }))) return;
+		}
+		events.flush();
+	} finally {
+		await reader.cancel().catch(() => undefined);
+	}
+}
+
+/** Read the body straight off the socket, for a local server while offline. */
+async function readDirect(
+	url: string,
+	headers: Record<string, string>,
+	body: string,
+	events: SseBuffer,
+	signal?: AbortSignal,
+): Promise<void> {
+	// An error body is buffered rather than streamed, so it can be reported.
+	const res = await directRequest({
+		url,
+		method: 'POST',
+		headers,
+		body,
+		signal,
+		onChunk: (text) => void events.push(text),
+	});
+	if (res.status >= 400) {
+		throw new Error(`API error ${res.status}: ${res.text.trim().slice(0, 500)}`);
+	}
+	events.flush();
 }
 
 /**

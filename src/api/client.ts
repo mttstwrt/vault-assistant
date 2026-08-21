@@ -2,6 +2,7 @@ import { requestUrl } from 'obsidian';
 import { ChatMessage, ToolSpec } from '../types';
 import { VaultAssistantSettings } from '../settings';
 import { splitThinkTags } from './reasoning';
+import { describeRequestError, directRequest, withDirectRetry } from './node-http';
 import {
 	ApiTimings,
 	ApiToolCall,
@@ -52,20 +53,29 @@ export async function embed(
 	const key = settings.embedApiKey.trim() || settings.apiKey.trim();
 	if (key) headers['Authorization'] = `Bearer ${key}`;
 
-	const res = await requestUrl({
-		url: `${base}/embeddings`,
-		method: 'POST',
-		headers,
-		body: JSON.stringify({ model, input: texts }),
-		throw: false,
+	const url = `${base}/embeddings`;
+	const body = JSON.stringify({ model, input: texts });
+	const res = await withDirectRetry(
+		url,
+		async () => {
+			const r = await requestUrl({ url, method: 'POST', headers, body, throw: false });
+			return { status: r.status, text: r.text ?? '' };
+		},
+		() => directRequest({ url, method: 'POST', headers, body }),
+	).catch((e: unknown) => {
+		throw new Error(describeRequestError(e, url));
 	});
 
 	if (res.status >= 400) {
-		const detail = (res.text ?? '').slice(0, 300);
-		throw new Error(`Embeddings API error ${res.status}: ${detail}`);
+		throw new Error(`Embeddings API error ${res.status}: ${res.text.slice(0, 300)}`);
 	}
 
-	const data = (res.json as EmbeddingsResponse)?.data;
+	let data: EmbeddingsResponse['data'];
+	try {
+		data = (JSON.parse(res.text) as EmbeddingsResponse).data;
+	} catch {
+		throw new Error('Embeddings API returned a response that is not JSON.');
+	}
 	if (!Array.isArray(data) || data.length !== texts.length) {
 		throw new Error(
 			`Embeddings API returned ${Array.isArray(data) ? data.length : 0} vectors for ${texts.length} inputs.`,
@@ -93,23 +103,30 @@ export async function chatCompletion(
 	overrides: CallOverrides = {},
 ): Promise<LLMResult> {
 	const { url, headers } = chatEndpoint(settings);
-	const body = chatRequestBody(settings, messages, tools, overrides, false);
+	const body = JSON.stringify(chatRequestBody(settings, messages, tools, overrides, false));
 	const startedAt = Date.now();
 
-	const res = await requestUrl({
+	const res = await withDirectRetry(
 		url,
-		method: 'POST',
-		headers,
-		body: JSON.stringify(body),
-		throw: false,
+		async () => {
+			const r = await requestUrl({ url, method: 'POST', headers, body, throw: false });
+			return { status: r.status, text: r.text ?? '' };
+		},
+		() => directRequest({ url, method: 'POST', headers, body }),
+	).catch((e: unknown) => {
+		throw new Error(describeRequestError(e, url));
 	});
 
 	if (res.status >= 400) {
-		const detail = (res.text ?? '').slice(0, 500);
-		throw new Error(`API error ${res.status}: ${detail}`);
+		throw new Error(`API error ${res.status}: ${res.text.slice(0, 500)}`);
 	}
 
-	const json = res.json as ChatCompletionResponse;
+	let json: ChatCompletionResponse;
+	try {
+		json = JSON.parse(res.text) as ChatCompletionResponse;
+	} catch {
+		throw new Error('Unexpected API response: the endpoint did not return JSON.');
+	}
 	const msg = json?.choices?.[0]?.message;
 	if (!msg) {
 		throw new Error('Unexpected API response: no message returned.');
