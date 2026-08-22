@@ -38,6 +38,11 @@ export interface ApprovalRequest {
 	path?: string;
 	/** The target file's parent folder, for "always allow this folder". Write requests only. */
 	folder?: string;
+	/**
+	 * The write being asked about, so the card can show it as a diff before you
+	 * allow it. Write requests only, and never sent to the model.
+	 */
+	preview?: { before: string; after: string };
 	/** The MCP server id/name behind the tool. MCP requests only. */
 	serverId?: string;
 	serverName?: string;

@@ -30,12 +30,14 @@ import { AssistantTurn } from './assistant-turn';
 import { fitToContent } from './autogrow';
 import {
 	addAssistantBubble,
+	addDiffPreview,
 	addError,
 	addFileChange,
 	addInfo,
 	addToolCall,
 	addToolResult,
 	addUserBubble,
+	markPreviewApplied,
 	prettyJson,
 } from './message-render';
 
@@ -77,6 +79,8 @@ export class ChatView extends ItemView {
 	private mounted = false;
 	/** A transcript setState asked for before the panel existed. */
 	private pendingPath: string | null = null;
+	/** A write the user just approved, whose preview becomes the record of it. */
+	private approvedWrite: { path: string; after: string; card: HTMLElement } | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: VaultAssistantPlugin) {
 		super(leaf);
@@ -368,12 +372,15 @@ export class ChatView extends ItemView {
 	private cancelPendingApprovals(): void {
 		for (const resolve of this.pendingApprovals) resolve('deny');
 		this.pendingApprovals.clear();
+		this.approvedWrite = null;
 	}
 
 	/** Render an approval card and resolve when the user picks an option. */
 	private requestApproval(req: ApprovalRequest): Promise<ApprovalResult> {
 		return new Promise<ApprovalResult>((resolve) => {
 			this.pendingApprovals.add(resolve);
+			/** The diff shown for a pending write, relabelled once it is applied. */
+			let preview: HTMLElement | null = null;
 
 			const card = this.messagesEl.createDiv({ cls: 'va-approval' });
 			const head = card.createDiv({ cls: 'va-approval-head' });
@@ -394,12 +401,18 @@ export class ChatView extends ItemView {
 					text: `The agent wants to write outside your allowed folders (via ${req.tool}):`,
 				});
 				card.createEl('code', { cls: 'va-approval-path', text: req.path ?? '' });
+				// Decide on the actual change, not just the path.
+				if (req.preview) preview = addDiffPreview(card, req.preview.before, req.preview.after);
 			}
 
 			const row = card.createDiv({ cls: 'va-approval-actions' });
 			const settle = (result: ApprovalResult, label: string): void => {
 				if (!this.pendingApprovals.has(resolve)) return;
 				this.pendingApprovals.delete(resolve);
+				// An allowed write happens next; its diff is already on screen.
+				if (preview && req.preview && result !== 'deny') {
+					this.approvedWrite = { path: req.path ?? '', after: req.preview.after, card: preview };
+				}
 				row.empty();
 				card.addClass('va-approval-done');
 				card.createDiv({ cls: 'va-approval-choice', text: `→ ${label}` });
@@ -462,6 +475,13 @@ export class ChatView extends ItemView {
 
 	/** Show what a write actually changed, as a diff. */
 	private addFileChange(change: FileChange): void {
+		const approved = this.approvedWrite;
+		if (approved && approved.path === change.path && approved.after === change.after) {
+			// This is the write the approval card already previewed.
+			markPreviewApplied(approved.card, change);
+			this.approvedWrite = null;
+			return;
+		}
 		addFileChange(this.messagesEl, change);
 		this.scrollToBottom();
 	}

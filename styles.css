@@ -250,6 +250,13 @@
 	color: var(--text-error);
 }
 
+/* The pending write on an approval card. */
+.va-change-preview,
+.va-approval .va-change {
+	margin-top: 8px;
+	background: var(--background-primary);
+}
+
 .va-diff {
 	margin: 6px 0 2px;
 	padding: 4px 0;

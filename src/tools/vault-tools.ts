@@ -216,18 +216,39 @@ async function ensureFolder(app: App, folder: string): Promise<void> {
 	}
 }
 
+/** What a file holds right now, or '' when it doesn't exist yet. */
+async function currentContent(app: App, path: string): Promise<string> {
+	const f = app.vault.getAbstractFileByPath(path);
+	return f instanceof TFile ? await app.vault.read(f) : '';
+}
+
 /**
  * Decide whether `path` may be written. Returns null to proceed, or an error
  * string to hand back to the model when the user denies. Prompts the user for
  * out-of-scope writes and may widen the allowlist (for this session, or
  * persistently) as a side effect of an "always allow" grant.
+ *
+ * `after` is the content the tool intends to write, so the approval card can
+ * show the diff. It is read for the prompt only — an allowed write never
+ * touches the file here.
  */
-async function ensureWritable(ctx: ToolContext, tool: string, path: string): Promise<string | null> {
+async function ensureWritable(
+	ctx: ToolContext,
+	tool: string,
+	path: string,
+	after: string,
+): Promise<string | null> {
 	const p = normalizePath(path);
 	if (isWritable(p, ctx.settings) || ctx.sessionWrites.has(p)) return null;
 
 	const folder = parentFolder(p);
-	const decision = await ctx.requestApproval({ kind: 'write', tool, path: p, folder });
+	const decision = await ctx.requestApproval({
+		kind: 'write',
+		tool,
+		path: p,
+		folder,
+		preview: { before: await currentContent(ctx.app, p), after },
+	});
 	switch (decision) {
 		case 'once':
 			return null;
@@ -310,7 +331,7 @@ async function writeFile(
 	path: string,
 	content: string,
 ): Promise<string> {
-	const denied = await ensureWritable(ctx, tool, path);
+	const denied = await ensureWritable(ctx, tool, path, content);
 	if (denied) return denied;
 	return doWrite(ctx, path, content);
 }
@@ -401,15 +422,13 @@ export async function executeTool(
 
 			case 'append_file': {
 				const p = toVaultPath(app, str(args.path));
-				const denied = await ensureWritable(ctx, 'append_file', p);
-				if (denied) return denied;
 				const existing = app.vault.getAbstractFileByPath(p);
-				if (existing instanceof TFile) {
-					const cur = await app.vault.read(existing);
-					await doWrite(ctx, p, cur + str(args.content));
-					return `Appended to ${p}`;
-				}
-				return await doWrite(ctx, p, str(args.content));
+				const cur = existing instanceof TFile ? await app.vault.read(existing) : null;
+				const after = (cur ?? '') + str(args.content);
+				const denied = await ensureWritable(ctx, 'append_file', p, after);
+				if (denied) return denied;
+				await doWrite(ctx, p, after);
+				return cur === null ? `Created ${p}` : `Appended to ${p}`;
 			}
 
 			case 'remember': {
@@ -422,10 +441,11 @@ export async function executeTool(
 				if (!content.trim()) return 'Error: memory content is required.';
 				const existing = app.vault.getAbstractFileByPath(path);
 				if (str(args.mode) !== 'replace' && existing instanceof TFile) {
-					const denied = await ensureWritable(ctx, 'remember', path);
-					if (denied) return denied;
 					const cur = await app.vault.read(existing);
-					await doWrite(ctx, path, `${cur.trimEnd()}\n\n${content}`);
+					const after = `${cur.trimEnd()}\n\n${content}`;
+					const denied = await ensureWritable(ctx, 'remember', path, after);
+					if (denied) return denied;
+					await doWrite(ctx, path, after);
 					return `Remembered (appended to ${path}).`;
 				}
 				await writeFile(ctx, 'remember', path, content);
@@ -484,10 +504,11 @@ export async function executeTool(
 				const content = str(args.content);
 				const existing = app.vault.getAbstractFileByPath(path);
 				if (str(args.mode) === 'append' && existing instanceof TFile) {
-					const denied = await ensureWritable(ctx, 'update_wiki', path);
-					if (denied) return denied;
 					const cur = await app.vault.read(existing);
-					await doWrite(ctx, path, `${cur}\n\n${content}`);
+					const after = `${cur}\n\n${content}`;
+					const denied = await ensureWritable(ctx, 'update_wiki', path, after);
+					if (denied) return denied;
+					await doWrite(ctx, path, after);
 					return `Appended to ${path}`;
 				}
 				return await writeFile(ctx, 'update_wiki', path, content);

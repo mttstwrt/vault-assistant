@@ -1,7 +1,7 @@
 /** Rendering helpers shared by the chat panel and its streaming turns. */
 import { App, Component, MarkdownRenderer, Notice, setIcon } from 'obsidian';
 import { FileChange, ToolCall } from '../types';
-import { diffLines } from './diff';
+import { FileDiff, diffLines } from './diff';
 
 /** Pretty-print a JSON string for display, falling back to the raw text. */
 export function prettyJson(raw: string): string {
@@ -84,6 +84,41 @@ const MAX_DIFF_ROWS = 400;
 /** A change this small is worth showing without a click. */
 const OPEN_BELOW = 24;
 
+/** "+12 −3", coloured, for a diff's header. */
+function renderCounts(parent: HTMLElement, diff: FileDiff): void {
+	const counts = parent.createSpan({ cls: 'va-change-counts' });
+	if (diff.added) counts.createSpan({ cls: 'va-diff-add-text', text: `+${diff.added}` });
+	if (diff.removed) counts.createSpan({ cls: 'va-diff-del-text', text: `−${diff.removed}` });
+}
+
+/** Draw the diff itself: hunks, the gaps between them, and the caps. */
+function renderDiffBody(parent: HTMLElement, diff: FileDiff): void {
+	const body = parent.createDiv({ cls: 'va-diff' });
+	if (diff.truncated) {
+		body.createDiv({
+			cls: 'va-diff-note',
+			text: `Too large to diff: ${diff.removed} lines replaced by ${diff.added}.`,
+		});
+		return;
+	}
+
+	let drawn = 0;
+	for (const hunk of diff.hunks) {
+		if (drawn >= MAX_DIFF_ROWS) break;
+		if (hunk.gapBefore) body.createDiv({ cls: 'va-diff-gap', text: '⋯' });
+		for (const line of hunk.lines) {
+			if (drawn++ >= MAX_DIFF_ROWS) break;
+			const cls =
+				line.kind === 'add' ? 'va-diff-add' : line.kind === 'remove' ? 'va-diff-del' : 'va-diff-ctx';
+			const mark = line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : ' ';
+			body.createDiv({ cls: `va-diff-line ${cls}`, text: `${mark}${line.text}` });
+		}
+	}
+	if (drawn >= MAX_DIFF_ROWS) {
+		body.createDiv({ cls: 'va-diff-note', text: '…rest of the diff not shown.' });
+	}
+}
+
 /**
  * A write, shown as a diff: green additions, red removals, a little context.
  * Small changes are expanded; larger ones collapse behind their line counts.
@@ -102,35 +137,42 @@ export function addFileChange(parent: HTMLElement, change: FileChange): HTMLElem
 		cls: 'va-change-path',
 		text: `${change.kind === 'create' ? 'Created' : 'Updated'} ${change.path}`,
 	});
-	const counts = summary.createSpan({ cls: 'va-change-counts' });
-	if (diff.added) counts.createSpan({ cls: 'va-diff-add-text', text: `+${diff.added}` });
-	if (diff.removed) counts.createSpan({ cls: 'va-diff-del-text', text: `−${diff.removed}` });
-
-	const body = card.createDiv({ cls: 'va-diff' });
-	if (diff.truncated) {
-		body.createDiv({
-			cls: 'va-diff-note',
-			text: `Too large to diff: ${diff.removed} lines replaced by ${diff.added}.`,
-		});
-		return card;
-	}
-
-	let drawn = 0;
-	for (const hunk of diff.hunks) {
-		if (drawn >= MAX_DIFF_ROWS) break;
-		if (hunk.gapBefore) body.createDiv({ cls: 'va-diff-gap', text: '⋯' });
-		for (const line of hunk.lines) {
-			if (drawn++ >= MAX_DIFF_ROWS) break;
-			const cls =
-				line.kind === 'add' ? 'va-diff-add' : line.kind === 'remove' ? 'va-diff-del' : 'va-diff-ctx';
-			const mark = line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : ' ';
-			body.createDiv({ cls: `va-diff-line ${cls}`, text: `${mark}${line.text}` });
-		}
-	}
-	if (drawn >= MAX_DIFF_ROWS) {
-		body.createDiv({ cls: 'va-diff-note', text: '…rest of the diff not shown.' });
-	}
+	renderCounts(summary, diff);
+	renderDiffBody(card, diff);
 	return card;
+}
+
+/**
+ * The same diff, for a write that hasn't happened yet: what the approval card
+ * is actually asking you to allow.
+ */
+export function addDiffPreview(parent: HTMLElement, before: string, after: string): HTMLElement {
+	const diff = diffLines(before, after);
+	const card = parent.createEl('details', { cls: 'va-change va-change-preview' });
+	card.open = !diff.truncated && diff.added + diff.removed <= OPEN_BELOW;
+
+	const summary = card.createEl('summary');
+	setIcon(summary.createSpan({ cls: 'va-change-icon' }), before ? 'file-pen' : 'file-plus');
+	summary.createSpan({
+		cls: 'va-change-path',
+		text: before ? 'What it would change' : 'What it would write',
+	});
+	renderCounts(summary, diff);
+	renderDiffBody(card, diff);
+	return card;
+}
+
+/**
+ * Relabel an approved preview as the write that followed, so the card you said
+ * yes to becomes the record of what happened — rather than drawing the same
+ * diff twice.
+ */
+export function markPreviewApplied(card: HTMLElement, change: FileChange): void {
+	const label = card.querySelector('.va-change-path');
+	if (label instanceof HTMLElement) {
+		label.setText(`${change.kind === 'create' ? 'Created' : 'Updated'} ${change.path}`);
+	}
+	card.removeClass('va-change-preview');
 }
 
 export function addToolResult(details: HTMLElement, result: string): void {
