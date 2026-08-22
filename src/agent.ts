@@ -87,6 +87,8 @@ export async function runAgent(
 		...[...extraTools.values()].map((t) => t.spec),
 		...mcp.toolSpecs().filter((t) => allow(t.name)),
 	];
+	/** What this request was actually offered, for redirecting stray tool calls. */
+	const offered = new Set(tools.map((t) => t.name));
 	const maxSteps = opts.maxSteps ?? settings.maxSteps;
 	const stream = settings.streamResponses ? events.stream : undefined;
 
@@ -169,7 +171,7 @@ export async function runAgent(
 			const extra = extraTools.get(call.name);
 			const out = extra
 				? await extra.run(call.arguments)
-				: await executeTool(ctx, call.name, call.arguments);
+				: await executeTool(ctx, call.name, call.arguments, offered);
 			events.onToolResult(call, out);
 			history.push({ role: 'tool', toolCallId: call.id, content: out });
 		}

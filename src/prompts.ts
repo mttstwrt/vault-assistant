@@ -3,6 +3,7 @@ import { VaultAssistantSettings } from './settings';
 import { displayScopes, writeScopes } from './permissions';
 import { buildMemorySection } from './memory';
 import { buildWikiSection } from './wiki';
+import { activeToolSpecs } from './tools/vault-tools';
 
 /**
  * Build the full system prompt: the user's base instructions, a live
@@ -13,6 +14,19 @@ export async function buildSystemPrompt(app: App, settings: VaultAssistantSettin
 	const readDesc = settings.readBlockPaths.length
 		? 'your whole vault except a few private areas the user has blocked (those files are hidden from you)'
 		: 'your whole vault';
+
+	// Stated as environment rather than advice, because it is not negotiable:
+	// models trained as coding agents otherwise spend rounds trying `ls` and
+	// `cat` before they reach for the vault tools.
+	const access = [
+		'',
+		'--- How you reach this vault ---',
+		'You have no shell, no filesystem access and no network access. The tools listed for this request are your only way to see or change anything, and they act on the vault through Obsidian, not on files on disk.',
+		`Vault tools: ${activeToolSpecs(settings)
+			.map((t) => t.name)
+			.join(', ')}${settings.mcpServers.some((s) => s.enabled) ? ', plus any MCP tools listed for this request' : ''}.`,
+		'Paths are always relative to the vault root — "Notes/Ideas.md", never "/home/you/Vault/Notes/Ideas.md" or "C:\\...". There is no working directory, no "~", and no leading slash.',
+	].join('\n');
 
 	const env = [
 		'',
@@ -27,5 +41,5 @@ export async function buildSystemPrompt(app: App, settings: VaultAssistantSettin
 	const memory = await buildMemorySection(app, settings);
 	const wiki = await buildWikiSection(app, settings);
 
-	return `${settings.systemPrompt}\n${env}${memory}${wiki}`;
+	return `${settings.systemPrompt}\n${access}\n${env}${memory}${wiki}`;
 }

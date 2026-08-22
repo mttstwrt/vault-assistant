@@ -6,6 +6,8 @@ import { McpManager } from '../mcp/manager';
 import { RagIndexer } from '../rag/indexer';
 import { buildWikiIndex, describeLinks, wikiHomePath } from './graph';
 import { describeOpenFiles } from './workspace';
+import { normalizeArgs, redirectTool } from './aliases';
+import { findFolder, findNote, notFoundMessage, toVaultPath } from './paths';
 
 /** Everything a tool invocation needs: the app, settings, and the approval hooks. */
 export interface ToolContext {
@@ -316,27 +318,34 @@ function sanitizeTitle(title: string): string {
 		.trim();
 }
 
-/** Run a tool by name and return a string result for the model. */
+/**
+ * Run a tool by name and return a string result for the model.
+ *
+ * `offered` is the set of tool names this request was given, used to redirect
+ * a model that reaches for a shell or a filesystem tool instead (see
+ * ./aliases). MCP tools dispatch on their own prefix.
+ */
 export async function executeTool(
 	ctx: ToolContext,
 	name: string,
 	argsJson: string,
+	offered?: Set<string>,
 ): Promise<string> {
 	const { app, settings } = ctx;
-	let args: Record<string, unknown>;
+	let parsed: Record<string, unknown>;
 	try {
-		args = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+		parsed = JSON.parse(argsJson || '{}') as Record<string, unknown>;
 	} catch {
 		return 'Error: tool arguments were not valid JSON.';
 	}
+	const args = normalizeArgs(parsed);
 
 	try {
 		switch (name) {
 			case 'list_files': {
 				const raw = typeof args.path === 'string' ? args.path : '';
-				const p = raw ? normalizePath(raw) : '';
-				const folder = p ? app.vault.getAbstractFileByPath(p) : app.vault.getRoot();
-				if (!(folder instanceof TFolder)) return `Error: not a folder: "${p}".`;
+				const folder = findFolder(app, raw);
+				if (!folder) return `Error: no folder "${toVaultPath(app, raw)}" in the vault.`;
 				const lines = folder.children
 					.filter((c) => c instanceof TFolder || isReadable(c.path, settings))
 					.map((c) => (c instanceof TFolder ? `${c.path}/` : c.path))
@@ -345,14 +354,11 @@ export async function executeTool(
 			}
 
 			case 'read_file': {
-				const p = normalizePath(str(args.path));
-				const f = app.vault.getAbstractFileByPath(p);
-				// Blocked files are hidden: report them as missing so the agent
-				// never learns they exist.
-				if (!(f instanceof TFile) || !isReadable(p, settings)) {
-					return `Error: file not found: "${p}".`;
-				}
-				return await app.vault.cachedRead(f);
+				// Blocked files are hidden: findNote never matches or suggests
+				// them, so the agent never learns they exist.
+				const found = findNote(app, settings, str(args.path));
+				if (!found.file) return notFoundMessage(found);
+				return await app.vault.cachedRead(found.file);
 			}
 
 			case 'search': {
@@ -377,10 +383,15 @@ export async function executeTool(
 			}
 
 			case 'write_file':
-				return await writeFile(ctx, 'write_file', str(args.path), str(args.content));
+				return await writeFile(
+					ctx,
+					'write_file',
+					toVaultPath(app, str(args.path)),
+					str(args.content),
+				);
 
 			case 'append_file': {
-				const p = normalizePath(str(args.path));
+				const p = toVaultPath(app, str(args.path));
 				const denied = await ensureWritable(ctx, 'append_file', p);
 				if (denied) return denied;
 				const existing = app.vault.getAbstractFileByPath(p);
@@ -451,8 +462,11 @@ export async function executeTool(
 			case 'list_wiki':
 				return buildWikiIndex(app, settings);
 
-			case 'links':
-				return describeLinks(app, settings, str(args.path));
+			case 'links': {
+				const found = findNote(app, settings, str(args.path));
+				if (!found.file) return notFoundMessage(found);
+				return describeLinks(app, settings, found.file.path);
+			}
 
 			case 'update_wiki': {
 				const title = sanitizeTitle(str(args.title));
@@ -470,9 +484,17 @@ export async function executeTool(
 				return await writeFile(ctx, 'update_wiki', path, content);
 			}
 
-			default:
+			default: {
 				if (name.startsWith('mcp__')) return await callMcp(ctx, name, argsJson);
-				return `Error: unknown tool "${name}".`;
+				// Not one of ours: run the vault equivalent when that is safe,
+				// otherwise say which tool the model should have called.
+				const available = offered ?? new Set(activeToolSpecs(settings).map((t) => t.name));
+				const redirect = redirectTool(name, available);
+				if (redirect.run && redirect.run !== name) {
+					return await executeTool(ctx, redirect.run, JSON.stringify(args), available);
+				}
+				return `Error: ${redirect.message ?? `unknown tool "${name}".`}`;
+			}
 		}
 	} catch (e) {
 		return `Error running ${name}: ${e instanceof Error ? e.message : String(e)}`;
