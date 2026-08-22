@@ -10,6 +10,7 @@ import {
 	setIcon,
 } from 'obsidian';
 import type VaultAssistantPlugin from '../main';
+import { EFFORT_OPTIONS, ReasoningEffort } from '../settings';
 import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
 import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
@@ -144,6 +145,24 @@ export class ChatView extends ItemView {
 		});
 		setIcon(workflowBtn, 'telescope');
 		workflowBtn.onclick = () => this.openWorkflowModal();
+
+		// How hard the model should think. "Default" sends nothing, so endpoints
+		// that don't know reasoning_effort never see it.
+		const effort = header.createEl('select', {
+			cls: 'dropdown va-effort',
+			attr: {
+				'aria-label': 'Reasoning effort',
+				title: 'How hard a reasoning model should think (sent as reasoning_effort). Lower it when a model gets stuck thinking.',
+			},
+		});
+		for (const option of EFFORT_OPTIONS) {
+			effort.createEl('option', { value: option.value, text: option.label });
+		}
+		effort.value = this.plugin.settings.reasoningEffort;
+		this.registerDomEvent(effort, 'change', () => {
+			this.plugin.settings.reasoningEffort = effort.value as ReasoningEffort;
+			void this.plugin.saveSettings();
+		});
 
 		this.messagesEl = root.createDiv({ cls: 'va-messages' });
 

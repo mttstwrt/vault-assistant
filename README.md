@@ -12,7 +12,7 @@ The optional **conversation import** processes everything locally and only when 
 
 ## Features
 
-- **Chat side panel** — open from the ribbon (bot icon) or the command **Vault assistant: Open chat**. Answers **stream in** as they are written, with a collapsible **thinking** section for reasoning models that ticks while the model works and folds itself into "Thought for 4.2s" when the answer starts. **Ctrl+C** (or the Stop button, or the command **Stop the current response**) cuts a long answer off mid-sentence and keeps what you got. The composer **grows as you type** (up to 40% of the panel), all output is selectable and copyable — with a copy button on every message — and scrolling up detaches the view so you can read while the rest streams in. When the endpoint reports them, generation speed and token counts appear under the answer. On desktop, the pop-out button moves the panel into its own window — the open conversation follows it there, and the panel returns to whatever conversation it was showing when Obsidian restarts (auto-saved transcripts are how it travels, so with auto-save off a new window starts fresh).
+- **Chat side panel** — open from the ribbon (bot icon) or the command **Vault assistant: Open chat**. Answers **stream in** as they are written, with a collapsible **thinking** section for reasoning models that ticks while the model works and folds itself into "Thought for 4.2s" when the answer starts. **Ctrl+C** (or the Stop button, or the command **Stop the current response**) cuts a long answer off mid-sentence and keeps what you got. The composer **grows as you type** (up to 40% of the panel), all output is selectable and copyable — with a copy button on every message — and scrolling up detaches the view so you can read while the rest streams in. When the endpoint reports them, generation speed and token counts appear under the answer. An **effort selector** in the header sets how hard a reasoning model should think (default / minimal / low / medium / high, sent as `reasoning_effort`; *default* sends nothing). On desktop, the pop-out button moves the panel into its own window — the open conversation follows it there, and the panel returns to whatever conversation it was showing when Obsidian restarts (auto-saved transcripts are how it travels, so with auto-save off a new window starts fresh).
 - **Vault-aware agent** — the model is given tools to explore your notes and ground its answers in them:
   - `list_files`, `read_file`, `search`
   - `semantic_search` — embedding-based recall (when semantic search is enabled)
@@ -49,6 +49,8 @@ The optional **conversation import** processes everything locally and only when 
 | API key | Optional. Leave empty for local models. |
 | Model | Model name your endpoint expects, e.g. `llama3.1`, `gpt-4o-mini`. Models your endpoint advertises are detected when you open these settings and offered as a dropdown when there is more than one; the refresh button next to the field looks again after you change the URL. Typing a name always works, whatever was detected. |
 | Temperature | Sampling temperature. |
+| Presence penalty | −2 to 2, 0 = off. Sent as `presence_penalty`. Discourages reusing anything already said; a small positive value helps a model that keeps circling the same phrasing. |
+| Repetition penalty | 1 = off; 1.05–1.2 is the useful range. Sent as **both** `repeat_penalty` (llama.cpp) and `repetition_penalty` (vLLM, TGI) — an endpoint ignores the name it doesn't use. The usual fix for a model that gets stuck repeating itself or thinking in circles. |
 | Max tool steps | How many tool-call rounds the agent may take per message. |
 | Send extra request parameters | Optional. Merge a JSON object into every chat request to enable server-side samplers your endpoint supports — e.g. llama.cpp's dynamic temperature (`dynatemp_range`, `dynatemp_exponent`) or mirostat. llama.cpp's OpenAI-compatible server accepts these; Ollama's OpenAI route ignores them (use a Modelfile there instead). |
 | Stream responses | On by default. Shows the answer as it is written and lets you stop it mid-answer. Falls back to a single buffered request automatically if a stream can't be opened (some hosted APIs refuse in-app requests), so you can leave it on. |
@@ -114,6 +116,16 @@ The optional **conversation import** processes everything locally and only when 
 The conversations, wiki, and research folders and the memory file are always writable; everything else is read-only unless you add it to **Writable folders**.
 
 ## Troubleshooting
+
+**A model gets stuck thinking in circles.** Small reasoning models can loop inside their own thinking and never reach an answer. Four things help, roughly in order:
+
+1. **Effort selector** in the chat panel header — drop it to *low* or *minimal*. It goes out as `reasoning_effort`, which llama.cpp (for models whose template supports it), OpenAI and OpenRouter understand. Leave it on *default* to send nothing at all, which is what an endpoint that doesn't know the parameter needs.
+2. **Repetition penalty** around 1.05–1.15 in settings. A loop is repetition, and this is the sampler aimed at it.
+3. **Presence penalty** slightly positive, if the model circles the same idea in different words rather than repeating tokens exactly.
+4. **Ctrl+C**, which stops the answer and keeps whatever arrived — and the thinking section shows the elapsed time, so a loop is visible while it happens rather than after.
+
+To hard-cap a runaway response, add `{"max_tokens": 2048}` under **Send extra request parameters**.
+
 
 **`ERR_INTERNET_DISCONNECTED` with a local model.** Obsidian is an Electron app, and Chromium refuses every network request while the operating system reports no active network interface — including requests to `127.0.0.1`, where the internet is irrelevant. A model server on the same PC should not care whether you are online, so requests to a loopback address (`localhost`, `127.0.0.1`, `::1`) that fail this way are retried over a direct connection that talks to the socket instead of going through Chromium. That covers chat, streaming, embeddings, and model discovery. It applies on desktop only; remote endpoints keep using Obsidian's own request path, with its proxy and certificate handling, and genuinely do need a network. If a local endpoint still fails after the retry, the error is about the server itself — check it is running and listening on the port in **Base URL**.
 

@@ -10,15 +10,27 @@
 .va-header {
 	display: flex;
 	align-items: center;
-	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 4px;
 	padding: 8px 12px;
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
+/* Takes the slack, so the controls sit together on the right. */
 .va-title {
+	flex: 1 1 auto;
+	min-width: 0;
 	font-weight: 600;
 	font-size: var(--font-ui-small);
 	color: var(--text-muted);
+}
+
+.va-effort {
+	flex: 0 1 auto;
+	max-width: 11em;
+	height: auto;
+	padding: 2px 22px 2px 6px;
+	font-size: var(--font-ui-smaller);
 }
 
 .va-new {

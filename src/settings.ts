@@ -8,6 +8,22 @@ import { WORKFLOW_PRESETS } from './workflows/presets';
 type PickerKind = 'chat' | 'embed';
 
 /**
+ * How hard a reasoning model should think, sent as `reasoning_effort`.
+ * '' sends nothing at all, which is what endpoints that don't know the
+ * parameter need.
+ */
+export type ReasoningEffort = '' | 'minimal' | 'low' | 'medium' | 'high';
+
+/** The effort levels offered in the chat panel, in order. */
+export const EFFORT_OPTIONS: Array<{ value: ReasoningEffort; label: string }> = [
+	{ value: '', label: 'Effort: default' },
+	{ value: 'minimal', label: 'Effort: minimal' },
+	{ value: 'low', label: 'Effort: low' },
+	{ value: 'medium', label: 'Effort: medium' },
+	{ value: 'high', label: 'Effort: high' },
+];
+
+/**
  * One spelling per endpoint, so a trailing slash doesn't look like a different
  * server when caching what it serves.
  */
@@ -51,6 +67,12 @@ export interface VaultAssistantSettings {
 	streamResponses: boolean;
 	/** Keep the thinking section expanded while the model reasons. */
 	expandThinking: boolean;
+	/** How hard a reasoning model should think; '' sends nothing. Set from the chat panel. */
+	reasoningEffort: ReasoningEffort;
+	/** OpenAI-style presence_penalty (-2 to 2). 0 sends nothing. */
+	presencePenalty: number;
+	/** Repetition penalty (1 = off, higher discourages repeats). 1 sends nothing. */
+	repetitionPenalty: number;
 
 	// --- Agent behaviour ---
 	systemPrompt: string;
@@ -179,6 +201,9 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	extraBodyParams: '{\n  "dynatemp_range": 0.4,\n  "dynatemp_exponent": 1.0\n}',
 	streamResponses: true,
 	expandThinking: true,
+	reasoningEffort: '',
+	presencePenalty: 0,
+	repetitionPenalty: 1,
 	systemPrompt: DEFAULT_SYSTEM_PROMPT,
 	usePrePass: false,
 	useOpenFiles: true,
@@ -428,6 +453,36 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 					const n = Number(v);
 					if (!Number.isNaN(n)) {
 						s.temperature = n;
+						await this.save();
+					}
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('Presence penalty')
+			.setDesc(
+				'Discourages the model from reusing anything it has already said (-2 to 2, 0 = off). Sent as presence_penalty. A small positive value helps a model that keeps circling the same phrasing.',
+			)
+			.addText((t) =>
+				t.setValue(String(s.presencePenalty)).onChange(async (v) => {
+					const n = Number(v);
+					if (!Number.isNaN(n) && n >= -2 && n <= 2) {
+						s.presencePenalty = n;
+						await this.save();
+					}
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('Repetition penalty')
+			.setDesc(
+				'Scales down tokens the model has already produced (1 = off; 1.05–1.2 is the useful range). Sent as both repeat_penalty (llama.cpp) and repetition_penalty (vLLM, TGI) — an endpoint ignores the name it does not use. This is the usual fix for a model that gets stuck repeating itself or thinking in circles.',
+			)
+			.addText((t) =>
+				t.setValue(String(s.repetitionPenalty)).onChange(async (v) => {
+					const n = Number(v);
+					if (!Number.isNaN(n) && n >= 0.5 && n <= 2) {
+						s.repetitionPenalty = n;
 						await this.save();
 					}
 				}),
