@@ -1,6 +1,7 @@
 /** Rendering helpers shared by the chat panel and its streaming turns. */
 import { App, Component, MarkdownRenderer, Notice, setIcon } from 'obsidian';
-import { ToolCall } from '../types';
+import { FileChange, ToolCall } from '../types';
+import { diffLines } from './diff';
 
 /** Pretty-print a JSON string for display, falling back to the raw text. */
 export function prettyJson(raw: string): string {
@@ -76,6 +77,60 @@ export function addToolCall(parent: HTMLElement, call: ToolCall): HTMLElement {
 	summary.createSpan({ text: ` ${call.name}` });
 	details.createEl('pre', { cls: 'va-tool-args', text: prettyJson(call.arguments) });
 	return details;
+}
+
+/** Changed lines beyond this are summarised rather than drawn. */
+const MAX_DIFF_ROWS = 400;
+/** A change this small is worth showing without a click. */
+const OPEN_BELOW = 24;
+
+/**
+ * A write, shown as a diff: green additions, red removals, a little context.
+ * Small changes are expanded; larger ones collapse behind their line counts.
+ */
+export function addFileChange(parent: HTMLElement, change: FileChange): HTMLElement {
+	const diff = diffLines(change.before, change.after);
+	const card = parent.createEl('details', { cls: 'va-change' });
+	card.open = !diff.truncated && diff.added + diff.removed <= OPEN_BELOW;
+
+	const summary = card.createEl('summary');
+	setIcon(
+		summary.createSpan({ cls: 'va-change-icon' }),
+		change.kind === 'create' ? 'file-plus' : 'file-pen',
+	);
+	summary.createSpan({
+		cls: 'va-change-path',
+		text: `${change.kind === 'create' ? 'Created' : 'Updated'} ${change.path}`,
+	});
+	const counts = summary.createSpan({ cls: 'va-change-counts' });
+	if (diff.added) counts.createSpan({ cls: 'va-diff-add-text', text: `+${diff.added}` });
+	if (diff.removed) counts.createSpan({ cls: 'va-diff-del-text', text: `−${diff.removed}` });
+
+	const body = card.createDiv({ cls: 'va-diff' });
+	if (diff.truncated) {
+		body.createDiv({
+			cls: 'va-diff-note',
+			text: `Too large to diff: ${diff.removed} lines replaced by ${diff.added}.`,
+		});
+		return card;
+	}
+
+	let drawn = 0;
+	for (const hunk of diff.hunks) {
+		if (drawn >= MAX_DIFF_ROWS) break;
+		if (hunk.gapBefore) body.createDiv({ cls: 'va-diff-gap', text: '⋯' });
+		for (const line of hunk.lines) {
+			if (drawn++ >= MAX_DIFF_ROWS) break;
+			const cls =
+				line.kind === 'add' ? 'va-diff-add' : line.kind === 'remove' ? 'va-diff-del' : 'va-diff-ctx';
+			const mark = line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : ' ';
+			body.createDiv({ cls: `va-diff-line ${cls}`, text: `${mark}${line.text}` });
+		}
+	}
+	if (drawn >= MAX_DIFF_ROWS) {
+		body.createDiv({ cls: 'va-diff-note', text: '…rest of the diff not shown.' });
+	}
+	return card;
 }
 
 export function addToolResult(details: HTMLElement, result: string): void {

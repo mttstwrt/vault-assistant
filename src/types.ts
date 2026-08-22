@@ -16,6 +16,18 @@ export interface ChatMessage {
 	toolCallId?: string;
 }
 
+/**
+ * A write the agent made, so the panel can show it as a diff. This never goes
+ * back to the model — it only ever sees the short "Updated <path>" result.
+ */
+export interface FileChange {
+	path: string;
+	kind: 'create' | 'update';
+	/** The file's contents before the write; '' for a new file. */
+	before: string;
+	after: string;
+}
+
 /** A request to the user to approve an out-of-scope action. */
 export interface ApprovalRequest {
 	/** What kind of action needs approval. */

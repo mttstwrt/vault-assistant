@@ -10,7 +10,7 @@ import {
 	setIcon,
 } from 'obsidian';
 import type VaultAssistantPlugin from '../main';
-import { ApprovalRequest, ApprovalResult, ChatMessage, ToolCall } from '../types';
+import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
 import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
 import {
@@ -31,6 +31,7 @@ import { fitToContent } from './autogrow';
 import {
 	addAssistantBubble,
 	addError,
+	addFileChange,
 	addInfo,
 	addToolCall,
 	addToolResult,
@@ -459,6 +460,12 @@ export class ChatView extends ItemView {
 		this.scrollToBottom();
 	}
 
+	/** Show what a write actually changed, as a diff. */
+	private addFileChange(change: FileChange): void {
+		addFileChange(this.messagesEl, change);
+		this.scrollToBottom();
+	}
+
 	private addError(message: string): void {
 		addError(this.messagesEl, message);
 		this.scrollToBottom();
@@ -552,6 +559,7 @@ export class ChatView extends ItemView {
 					onToolCall: (call) => this.addToolCall(call),
 					onToolResult: (call, res) => this.addToolResult(call, res),
 					onError: (msg) => this.addError(msg),
+					onFileChange: (change) => this.addFileChange(change),
 					requestApproval: (req) => this.requestApproval(req),
 					stream: {
 						onStart: () => {
@@ -673,6 +681,7 @@ export class ChatView extends ItemView {
 				onToolCall: (call) => this.addToolCall(call),
 				onToolResult: (call, res) => this.addToolResult(call, res),
 				onError: (msg) => this.addError(msg),
+				onFileChange: (change) => this.addFileChange(change),
 				onInfo: (text) => {
 					addInfo(this.messagesEl, text);
 					this.scrollToBottom();

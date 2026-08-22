@@ -208,6 +208,90 @@
 	overflow: auto;
 }
 
+/* --- File changes (diff of what a write did) --- */
+
+.va-change {
+	font-size: var(--font-ui-smaller);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	padding: 4px 8px;
+	color: var(--text-muted);
+}
+.va-change summary {
+	cursor: pointer;
+	list-style: none;
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.va-change summary::-webkit-details-marker {
+	display: none;
+}
+.va-change-icon {
+	display: inline-flex;
+	vertical-align: middle;
+}
+.va-change-path {
+	flex: 1 1 auto;
+	min-width: 0;
+	word-break: break-all;
+	color: var(--text-normal);
+}
+.va-change-counts {
+	display: flex;
+	gap: 6px;
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+}
+.va-diff-add-text {
+	color: var(--text-success);
+}
+.va-diff-del-text {
+	color: var(--text-error);
+}
+
+.va-diff {
+	margin: 6px 0 2px;
+	padding: 4px 0;
+	background: var(--background-primary-alt);
+	border-radius: 6px;
+	font-family: var(--font-monospace);
+	font-size: var(--font-smallest);
+	line-height: 1.45;
+	max-height: 360px;
+	overflow: auto;
+}
+
+.va-diff-line {
+	padding: 0 8px;
+	white-space: pre-wrap;
+	word-break: break-word;
+	tab-size: 4;
+}
+.va-diff-ctx {
+	color: var(--text-muted);
+}
+.va-diff-add {
+	color: var(--text-success);
+	background: rgba(var(--color-green-rgb), 0.12);
+}
+.va-diff-del {
+	color: var(--text-error);
+	background: rgba(var(--color-red-rgb), 0.12);
+}
+
+.va-diff-gap {
+	padding: 0 8px;
+	color: var(--text-faint);
+	user-select: none;
+}
+
+.va-diff-note {
+	padding: 2px 8px;
+	color: var(--text-faint);
+	font-style: italic;
+}
+
 .va-approval {
 	font-size: var(--font-ui-small);
 	border: 1px solid var(--text-warning);

@@ -1,6 +1,6 @@
 import { App, TFile, TFolder, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from '../settings';
-import { ApprovalRequest, ApprovalResult, ToolSpec } from '../types';
+import { ApprovalRequest, ApprovalResult, FileChange, ToolSpec } from '../types';
 import { displayScopes, isReadable, isWritable, parentFolder, writeScopes } from '../permissions';
 import { McpManager } from '../mcp/manager';
 import { RagIndexer } from '../rag/indexer';
@@ -25,6 +25,8 @@ export interface ToolContext {
 	rag: RagIndexer;
 	/** Ask the user to approve a write outside the allowlist, or an MCP call. */
 	requestApproval: (req: ApprovalRequest) => Promise<ApprovalResult>;
+	/** Report a write, so the panel can show it as a diff. UI only. */
+	onFileChange?: (change: FileChange) => void;
 }
 
 export const TOOL_SPECS: ToolSpec[] = [
@@ -279,18 +281,25 @@ async function callMcp(ctx: ToolContext, name: string, argsJson: string): Promis
 	return ctx.mcp.callTool(name, argsJson);
 }
 
-/** Create or overwrite a file, with no permission check. */
-async function doWrite(app: App, path: string, content: string): Promise<string> {
+/**
+ * Create or overwrite a file, with no permission check, reporting what changed
+ * so the panel can show a diff. The model only gets the one-line result.
+ */
+async function doWrite(ctx: ToolContext, path: string, content: string): Promise<string> {
+	const { app } = ctx;
 	const p = normalizePath(path);
 	const dir = parentFolder(p);
 	if (dir) await ensureFolder(app, dir);
 
 	const existing = app.vault.getAbstractFileByPath(p);
 	if (existing instanceof TFile) {
+		const before = await app.vault.read(existing);
 		await app.vault.modify(existing, content);
+		ctx.onFileChange?.({ path: p, kind: 'update', before, after: content });
 		return `Updated ${p}`;
 	}
 	await app.vault.create(p, content);
+	ctx.onFileChange?.({ path: p, kind: 'create', before: '', after: content });
 	return `Created ${p}`;
 }
 
@@ -303,7 +312,7 @@ async function writeFile(
 ): Promise<string> {
 	const denied = await ensureWritable(ctx, tool, path);
 	if (denied) return denied;
-	return doWrite(ctx.app, path, content);
+	return doWrite(ctx, path, content);
 }
 
 /** Coerce an unknown tool argument to a string safely. */
@@ -397,10 +406,10 @@ export async function executeTool(
 				const existing = app.vault.getAbstractFileByPath(p);
 				if (existing instanceof TFile) {
 					const cur = await app.vault.read(existing);
-					await app.vault.modify(existing, cur + str(args.content));
+					await doWrite(ctx, p, cur + str(args.content));
 					return `Appended to ${p}`;
 				}
-				return await doWrite(app, p, str(args.content));
+				return await doWrite(ctx, p, str(args.content));
 			}
 
 			case 'remember': {
@@ -416,7 +425,7 @@ export async function executeTool(
 					const denied = await ensureWritable(ctx, 'remember', path);
 					if (denied) return denied;
 					const cur = await app.vault.read(existing);
-					await app.vault.modify(existing, `${cur.trimEnd()}\n\n${content}`);
+					await doWrite(ctx, path, `${cur.trimEnd()}\n\n${content}`);
 					return `Remembered (appended to ${path}).`;
 				}
 				await writeFile(ctx, 'remember', path, content);
@@ -478,7 +487,7 @@ export async function executeTool(
 					const denied = await ensureWritable(ctx, 'update_wiki', path);
 					if (denied) return denied;
 					const cur = await app.vault.read(existing);
-					await app.vault.modify(existing, `${cur}\n\n${content}`);
+					await doWrite(ctx, path, `${cur}\n\n${content}`);
 					return `Appended to ${path}`;
 				}
 				return await writeFile(ctx, 'update_wiki', path, content);

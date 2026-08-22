@@ -1,6 +1,6 @@
 import { App } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
-import { ApprovalRequest, ApprovalResult, ChatMessage, ToolCall, ToolSpec } from './types';
+import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall, ToolSpec } from './types';
 import { CallOverrides, CallStats, LLMResult, chatCompletion } from './api/client';
 import { streamChatCompletion } from './api/stream';
 import { ToolContext, activeToolSpecs, executeTool } from './tools/vault-tools';
@@ -26,6 +26,8 @@ export interface AgentEvents {
 	onError(message: string): void;
 	/** Ask the user to approve a write outside the allowed folders. */
 	requestApproval: (req: ApprovalRequest) => Promise<ApprovalResult>;
+	/** A file the agent wrote, so the panel can show the diff. */
+	onFileChange?: (change: FileChange) => void;
 	/**
 	 * Render turns as they stream. When provided (and streaming is enabled in
 	 * settings) assistant content is reported here instead of onAssistant.
@@ -79,6 +81,7 @@ export async function runAgent(
 		mcp,
 		rag,
 		requestApproval: events.requestApproval,
+		onFileChange: events.onFileChange,
 	};
 	const extraTools = new Map((opts.extraTools ?? []).map((t) => [t.spec.name, t]));
 	const allow = opts.toolFilter ?? (() => true);
