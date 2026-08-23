@@ -1,11 +1,13 @@
 import { App, TFile, TFolder, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from '../settings';
-import { ApprovalRequest, ApprovalResult, ToolSpec } from '../types';
+import { ApprovalRequest, ApprovalResult, FileChange, ToolSpec } from '../types';
 import { displayScopes, isReadable, isWritable, parentFolder, writeScopes } from '../permissions';
 import { McpManager } from '../mcp/manager';
 import { RagIndexer } from '../rag/indexer';
 import { buildWikiIndex, describeLinks, wikiHomePath } from './graph';
 import { describeOpenFiles } from './workspace';
+import { normalizeArgs, redirectTool } from './aliases';
+import { findFolder, findNote, notFoundMessage, toVaultPath } from './paths';
 
 /** Everything a tool invocation needs: the app, settings, and the approval hooks. */
 export interface ToolContext {
@@ -23,6 +25,8 @@ export interface ToolContext {
 	rag: RagIndexer;
 	/** Ask the user to approve a write outside the allowlist, or an MCP call. */
 	requestApproval: (req: ApprovalRequest) => Promise<ApprovalResult>;
+	/** Report a write, so the panel can show it as a diff. UI only. */
+	onFileChange?: (change: FileChange) => void;
 }
 
 export const TOOL_SPECS: ToolSpec[] = [
@@ -212,18 +216,39 @@ async function ensureFolder(app: App, folder: string): Promise<void> {
 	}
 }
 
+/** What a file holds right now, or '' when it doesn't exist yet. */
+async function currentContent(app: App, path: string): Promise<string> {
+	const f = app.vault.getAbstractFileByPath(path);
+	return f instanceof TFile ? await app.vault.read(f) : '';
+}
+
 /**
  * Decide whether `path` may be written. Returns null to proceed, or an error
  * string to hand back to the model when the user denies. Prompts the user for
  * out-of-scope writes and may widen the allowlist (for this session, or
  * persistently) as a side effect of an "always allow" grant.
+ *
+ * `after` is the content the tool intends to write, so the approval card can
+ * show the diff. It is read for the prompt only — an allowed write never
+ * touches the file here.
  */
-async function ensureWritable(ctx: ToolContext, tool: string, path: string): Promise<string | null> {
+async function ensureWritable(
+	ctx: ToolContext,
+	tool: string,
+	path: string,
+	after: string,
+): Promise<string | null> {
 	const p = normalizePath(path);
 	if (isWritable(p, ctx.settings) || ctx.sessionWrites.has(p)) return null;
 
 	const folder = parentFolder(p);
-	const decision = await ctx.requestApproval({ kind: 'write', tool, path: p, folder });
+	const decision = await ctx.requestApproval({
+		kind: 'write',
+		tool,
+		path: p,
+		folder,
+		preview: { before: await currentContent(ctx.app, p), after },
+	});
 	switch (decision) {
 		case 'once':
 			return null;
@@ -277,18 +302,25 @@ async function callMcp(ctx: ToolContext, name: string, argsJson: string): Promis
 	return ctx.mcp.callTool(name, argsJson);
 }
 
-/** Create or overwrite a file, with no permission check. */
-async function doWrite(app: App, path: string, content: string): Promise<string> {
+/**
+ * Create or overwrite a file, with no permission check, reporting what changed
+ * so the panel can show a diff. The model only gets the one-line result.
+ */
+async function doWrite(ctx: ToolContext, path: string, content: string): Promise<string> {
+	const { app } = ctx;
 	const p = normalizePath(path);
 	const dir = parentFolder(p);
 	if (dir) await ensureFolder(app, dir);
 
 	const existing = app.vault.getAbstractFileByPath(p);
 	if (existing instanceof TFile) {
+		const before = await app.vault.read(existing);
 		await app.vault.modify(existing, content);
+		ctx.onFileChange?.({ path: p, kind: 'update', before, after: content });
 		return `Updated ${p}`;
 	}
 	await app.vault.create(p, content);
+	ctx.onFileChange?.({ path: p, kind: 'create', before: '', after: content });
 	return `Created ${p}`;
 }
 
@@ -299,9 +331,9 @@ async function writeFile(
 	path: string,
 	content: string,
 ): Promise<string> {
-	const denied = await ensureWritable(ctx, tool, path);
+	const denied = await ensureWritable(ctx, tool, path, content);
 	if (denied) return denied;
-	return doWrite(ctx.app, path, content);
+	return doWrite(ctx, path, content);
 }
 
 /** Coerce an unknown tool argument to a string safely. */
@@ -316,27 +348,34 @@ function sanitizeTitle(title: string): string {
 		.trim();
 }
 
-/** Run a tool by name and return a string result for the model. */
+/**
+ * Run a tool by name and return a string result for the model.
+ *
+ * `offered` is the set of tool names this request was given, used to redirect
+ * a model that reaches for a shell or a filesystem tool instead (see
+ * ./aliases). MCP tools dispatch on their own prefix.
+ */
 export async function executeTool(
 	ctx: ToolContext,
 	name: string,
 	argsJson: string,
+	offered?: Set<string>,
 ): Promise<string> {
 	const { app, settings } = ctx;
-	let args: Record<string, unknown>;
+	let parsed: Record<string, unknown>;
 	try {
-		args = JSON.parse(argsJson || '{}') as Record<string, unknown>;
+		parsed = JSON.parse(argsJson || '{}') as Record<string, unknown>;
 	} catch {
 		return 'Error: tool arguments were not valid JSON.';
 	}
+	const args = normalizeArgs(parsed);
 
 	try {
 		switch (name) {
 			case 'list_files': {
 				const raw = typeof args.path === 'string' ? args.path : '';
-				const p = raw ? normalizePath(raw) : '';
-				const folder = p ? app.vault.getAbstractFileByPath(p) : app.vault.getRoot();
-				if (!(folder instanceof TFolder)) return `Error: not a folder: "${p}".`;
+				const folder = findFolder(app, raw);
+				if (!folder) return `Error: no folder "${toVaultPath(app, raw)}" in the vault.`;
 				const lines = folder.children
 					.filter((c) => c instanceof TFolder || isReadable(c.path, settings))
 					.map((c) => (c instanceof TFolder ? `${c.path}/` : c.path))
@@ -345,14 +384,11 @@ export async function executeTool(
 			}
 
 			case 'read_file': {
-				const p = normalizePath(str(args.path));
-				const f = app.vault.getAbstractFileByPath(p);
-				// Blocked files are hidden: report them as missing so the agent
-				// never learns they exist.
-				if (!(f instanceof TFile) || !isReadable(p, settings)) {
-					return `Error: file not found: "${p}".`;
-				}
-				return await app.vault.cachedRead(f);
+				// Blocked files are hidden: findNote never matches or suggests
+				// them, so the agent never learns they exist.
+				const found = findNote(app, settings, str(args.path));
+				if (!found.file) return notFoundMessage(found);
+				return await app.vault.cachedRead(found.file);
 			}
 
 			case 'search': {
@@ -377,19 +413,22 @@ export async function executeTool(
 			}
 
 			case 'write_file':
-				return await writeFile(ctx, 'write_file', str(args.path), str(args.content));
+				return await writeFile(
+					ctx,
+					'write_file',
+					toVaultPath(app, str(args.path)),
+					str(args.content),
+				);
 
 			case 'append_file': {
-				const p = normalizePath(str(args.path));
-				const denied = await ensureWritable(ctx, 'append_file', p);
-				if (denied) return denied;
+				const p = toVaultPath(app, str(args.path));
 				const existing = app.vault.getAbstractFileByPath(p);
-				if (existing instanceof TFile) {
-					const cur = await app.vault.read(existing);
-					await app.vault.modify(existing, cur + str(args.content));
-					return `Appended to ${p}`;
-				}
-				return await doWrite(app, p, str(args.content));
+				const cur = existing instanceof TFile ? await app.vault.read(existing) : null;
+				const after = (cur ?? '') + str(args.content);
+				const denied = await ensureWritable(ctx, 'append_file', p, after);
+				if (denied) return denied;
+				await doWrite(ctx, p, after);
+				return cur === null ? `Created ${p}` : `Appended to ${p}`;
 			}
 
 			case 'remember': {
@@ -402,10 +441,11 @@ export async function executeTool(
 				if (!content.trim()) return 'Error: memory content is required.';
 				const existing = app.vault.getAbstractFileByPath(path);
 				if (str(args.mode) !== 'replace' && existing instanceof TFile) {
-					const denied = await ensureWritable(ctx, 'remember', path);
-					if (denied) return denied;
 					const cur = await app.vault.read(existing);
-					await app.vault.modify(existing, `${cur.trimEnd()}\n\n${content}`);
+					const after = `${cur.trimEnd()}\n\n${content}`;
+					const denied = await ensureWritable(ctx, 'remember', path, after);
+					if (denied) return denied;
+					await doWrite(ctx, path, after);
 					return `Remembered (appended to ${path}).`;
 				}
 				await writeFile(ctx, 'remember', path, content);
@@ -451,8 +491,11 @@ export async function executeTool(
 			case 'list_wiki':
 				return buildWikiIndex(app, settings);
 
-			case 'links':
-				return describeLinks(app, settings, str(args.path));
+			case 'links': {
+				const found = findNote(app, settings, str(args.path));
+				if (!found.file) return notFoundMessage(found);
+				return describeLinks(app, settings, found.file.path);
+			}
 
 			case 'update_wiki': {
 				const title = sanitizeTitle(str(args.title));
@@ -461,18 +504,27 @@ export async function executeTool(
 				const content = str(args.content);
 				const existing = app.vault.getAbstractFileByPath(path);
 				if (str(args.mode) === 'append' && existing instanceof TFile) {
-					const denied = await ensureWritable(ctx, 'update_wiki', path);
-					if (denied) return denied;
 					const cur = await app.vault.read(existing);
-					await app.vault.modify(existing, `${cur}\n\n${content}`);
+					const after = `${cur}\n\n${content}`;
+					const denied = await ensureWritable(ctx, 'update_wiki', path, after);
+					if (denied) return denied;
+					await doWrite(ctx, path, after);
 					return `Appended to ${path}`;
 				}
 				return await writeFile(ctx, 'update_wiki', path, content);
 			}
 
-			default:
+			default: {
 				if (name.startsWith('mcp__')) return await callMcp(ctx, name, argsJson);
-				return `Error: unknown tool "${name}".`;
+				// Not one of ours: run the vault equivalent when that is safe,
+				// otherwise say which tool the model should have called.
+				const available = offered ?? new Set(activeToolSpecs(settings).map((t) => t.name));
+				const redirect = redirectTool(name, available);
+				if (redirect.run && redirect.run !== name) {
+					return await executeTool(ctx, redirect.run, JSON.stringify(args), available);
+				}
+				return `Error: ${redirect.message ?? `unknown tool "${name}".`}`;
+			}
 		}
 	} catch (e) {
 		return `Error running ${name}: ${e instanceof Error ? e.message : String(e)}`;

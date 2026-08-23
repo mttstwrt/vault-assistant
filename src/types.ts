@@ -16,6 +16,18 @@ export interface ChatMessage {
 	toolCallId?: string;
 }
 
+/**
+ * A write the agent made, so the panel can show it as a diff. This never goes
+ * back to the model — it only ever sees the short "Updated <path>" result.
+ */
+export interface FileChange {
+	path: string;
+	kind: 'create' | 'update';
+	/** The file's contents before the write; '' for a new file. */
+	before: string;
+	after: string;
+}
+
 /** A request to the user to approve an out-of-scope action. */
 export interface ApprovalRequest {
 	/** What kind of action needs approval. */
@@ -26,6 +38,11 @@ export interface ApprovalRequest {
 	path?: string;
 	/** The target file's parent folder, for "always allow this folder". Write requests only. */
 	folder?: string;
+	/**
+	 * The write being asked about, so the card can show it as a diff before you
+	 * allow it. Write requests only, and never sent to the model.
+	 */
+	preview?: { before: string; after: string };
 	/** The MCP server id/name behind the tool. MCP requests only. */
 	serverId?: string;
 	serverName?: string;

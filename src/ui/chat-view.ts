@@ -1,6 +1,18 @@
-import { ItemView, Keymap, MarkdownRenderer, Notice, TFile, WorkspaceLeaf, setIcon } from 'obsidian';
+import {
+	ItemView,
+	Keymap,
+	Notice,
+	Platform,
+	TFile,
+	ViewStateResult,
+	WorkspaceLeaf,
+	WorkspaceWindow,
+	setIcon,
+} from 'obsidian';
 import type VaultAssistantPlugin from '../main';
-import { ApprovalRequest, ApprovalResult, ChatMessage, ToolCall } from '../types';
+import { ReasoningEffort, effortLabel } from '../settings';
+import { EFFORT_LEVELS, serverEffortLevels } from '../api/props';
+import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
 import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
 import {
@@ -14,18 +26,29 @@ import { ImportModal } from './import-modal';
 import { WorkflowModal, WorkflowStart } from './workflow-modal';
 import { WorkflowRun, createRunNote } from '../workflows/runner';
 import { prepareContext, stripPrePass } from '../prepass';
+import { suggestConversationTitle } from '../title';
 import { buildOpenFilesBlock, stripOpenFiles } from '../tools/workspace';
+import { AssistantTurn } from './assistant-turn';
+import { fitToContent } from './autogrow';
+import {
+	addAssistantBubble,
+	addDiffPreview,
+	addError,
+	addFileChange,
+	addInfo,
+	addToolCall,
+	addToolResult,
+	addUserBubble,
+	markPreviewApplied,
+	prettyJson,
+} from './message-render';
 
 export const VIEW_TYPE_CHAT = 'vault-assistant-view';
 
-/** Pretty-print a JSON string for display, falling back to the raw text. */
-function prettyJson(raw: string): string {
-	try {
-		return JSON.stringify(JSON.parse(raw), null, 2);
-	} catch {
-		return raw;
-	}
-}
+const PLACEHOLDER = 'Ask about your vault…  (Enter to send, Shift+Enter for newline)';
+
+/** How close to the bottom still counts as "following the output", in pixels. */
+const FOLLOW_SLACK = 32;
 
 export class ChatView extends ItemView {
 	private plugin: VaultAssistantPlugin;
@@ -36,7 +59,9 @@ export class ChatView extends ItemView {
 	private busy = false;
 
 	private messagesEl!: HTMLElement;
+	private statusEl!: HTMLElement;
 	private inputEl!: HTMLTextAreaElement;
+	private effortEl!: HTMLSelectElement;
 	private sendBtn!: HTMLButtonElement;
 	private toolEls = new Map<string, HTMLElement>();
 	/** Write paths the user approved for the rest of this conversation. */
@@ -47,6 +72,18 @@ export class ChatView extends ItemView {
 	private pendingApprovals = new Set<(r: ApprovalResult) => void>();
 	/** The workflow run this panel is currently hosting, if any. */
 	private workflowRun: WorkflowRun | null = null;
+	/** Cuts off the answer being streamed (Stop button / Ctrl+C). */
+	private abort: AbortController | null = null;
+	/** The turn currently streaming in, if any. */
+	private turn: AssistantTurn | null = null;
+	/** False once the user scrolls up, so streaming output stops yanking the view. */
+	private followOutput = true;
+	/** True once onOpen has built the panel, so setState knows whether to wait. */
+	private mounted = false;
+	/** A transcript setState asked for before the panel existed. */
+	private pendingPath: string | null = null;
+	/** A write the user just approved, whose preview becomes the record of it. */
+	private approvedWrite: { path: string; after: string; card: HTMLElement } | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: VaultAssistantPlugin) {
 		super(leaf);
@@ -93,6 +130,17 @@ export class ChatView extends ItemView {
 		setIcon(importBtn, 'import');
 		importBtn.onclick = () => new ImportModal(this.app, this.plugin).open();
 
+		// Popout windows are a desktop feature, and there is nothing to pop out
+		// of once the panel is already in its own window.
+		if (Platform.isDesktopApp && !this.inPopoutWindow()) {
+			const popBtn = header.createEl('button', {
+				cls: 'va-new',
+				attr: { 'aria-label': 'Move chat to a new window' },
+			});
+			setIcon(popBtn, 'picture-in-picture-2');
+			popBtn.onclick = () => this.popOut();
+		}
+
 		const workflowBtn = header.createEl('button', {
 			cls: 'va-new',
 			attr: { 'aria-label': 'Run workflow' },
@@ -100,18 +148,40 @@ export class ChatView extends ItemView {
 		setIcon(workflowBtn, 'telescope');
 		workflowBtn.onclick = () => this.openWorkflowModal();
 
+		// How hard the model should think. "Default" sends nothing, so endpoints
+		// that don't know reasoning_effort never see it.
+		this.effortEl = header.createEl('select', {
+			cls: 'dropdown va-effort',
+			attr: {
+				'aria-label': 'Reasoning effort',
+				title: 'How hard a reasoning model should think (sent as reasoning_effort). Lower it when a model gets stuck thinking.',
+			},
+		});
+		this.renderEffortOptions(EFFORT_LEVELS);
+		this.registerDomEvent(this.effortEl, 'change', () => {
+			this.plugin.settings.reasoningEffort = this.effortEl.value as ReasoningEffort;
+			void this.plugin.saveSettings();
+		});
+		// Narrow the list to what this model actually understands, if the
+		// endpoint is willing to say (llama.cpp is; most aren't).
+		void serverEffortLevels(this.plugin.settings.baseUrl, this.plugin.settings.apiKey).then(
+			(levels) => {
+				if (levels && this.mounted) this.renderEffortOptions(levels);
+			},
+		);
+
 		this.messagesEl = root.createDiv({ cls: 'va-messages' });
 
 		// MarkdownRenderer marks [[wikilinks]] as internal links but custom views
 		// must handle navigation themselves — delegate clicks and hover previews.
-		this.messagesEl.addEventListener('click', (evt) => {
+		this.registerDomEvent(this.messagesEl, 'click', (evt) => {
 			const link = (evt.target as HTMLElement).closest('a.internal-link');
 			if (!(link instanceof HTMLElement)) return;
 			evt.preventDefault();
 			const target = link.getAttr('data-href') ?? link.getAttr('href');
 			if (target) void this.app.workspace.openLinkText(target, '', Keymap.isModEvent(evt));
 		});
-		this.messagesEl.addEventListener('mouseover', (evt) => {
+		this.registerDomEvent(this.messagesEl, 'mouseover', (evt) => {
 			const link = (evt.target as HTMLElement).closest('a.internal-link');
 			if (!(link instanceof HTMLElement)) return;
 			this.app.workspace.trigger('hover-link', {
@@ -122,34 +192,183 @@ export class ChatView extends ItemView {
 				linktext: link.getAttr('data-href') ?? '',
 			});
 		});
+		// Scrolling up detaches the panel from the stream, so long answers can be
+		// read (and selected) while the rest is still being written.
+		this.registerDomEvent(this.messagesEl, 'scroll', () => {
+			const el = this.messagesEl;
+			this.followOutput = el.scrollTop + el.clientHeight >= el.scrollHeight - FOLLOW_SLACK;
+		});
+
+		this.statusEl = root.createDiv({ cls: 'va-status' });
+		this.setStatus(null);
 
 		const inputRow = root.createDiv({ cls: 'va-input-row' });
 		this.inputEl = inputRow.createEl('textarea', {
 			cls: 'va-input',
-			attr: { rows: '2', placeholder: 'Ask about your vault…  (Enter to send, Shift+Enter for newline)' },
+			attr: { rows: '1', placeholder: PLACEHOLDER },
 		});
 		this.sendBtn = inputRow.createEl('button', { cls: 'va-send', text: 'Send' });
 
 		this.sendBtn.onclick = () => void this.send();
-		this.inputEl.addEventListener('keydown', (evt) => {
-			if (evt.key === 'Enter' && !evt.shiftKey) {
+		this.registerDomEvent(this.inputEl, 'keydown', (evt) => {
+			// isComposing guards IME input, where Enter commits a candidate.
+			if (evt.key === 'Enter' && !evt.shiftKey && !evt.isComposing) {
 				evt.preventDefault();
 				void this.send();
 			}
 		});
+		// Grow the composer with its content, up to the height CSS allows.
+		this.registerDomEvent(this.inputEl, 'input', () => fitToContent(this.inputEl));
+		fitToContent(this.inputEl);
 
+		// Ctrl+C stops the answer being generated, the way it does in a terminal.
+		this.registerDomEvent(this.containerEl, 'keydown', (evt) => {
+			if (evt.key.toLowerCase() !== 'c' || !evt.ctrlKey || evt.metaKey || evt.altKey) return;
+			if (!this.busy || this.hasSelection()) return;
+			evt.preventDefault();
+			this.interrupt();
+		});
+
+		this.mounted = true;
+		// Continue the conversation this panel was showing before it moved
+		// windows (or before Obsidian restarted); otherwise start fresh.
+		const pending = this.pendingPath;
+		this.pendingPath = null;
+		if (pending && (await this.loadConversationPath(pending))) return;
 		await this.resetConversation();
 	}
 
 	async onClose(): Promise<void> {
+		this.mounted = false;
+		this.abort?.abort();
+		this.abort = null;
+		this.turn?.dispose();
+		this.turn = null;
 		this.workflowRun?.stop();
 		this.cancelPendingApprovals();
 		this.toolEls.clear();
 	}
 
+	/** True while a message or workflow run is in flight. */
+	isBusy(): boolean {
+		return this.busy;
+	}
+
+	/**
+	 * Fill the effort selector. `levels` is the model's own set when the
+	 * endpoint could tell us, otherwise every level llama.cpp documents. The
+	 * saved choice is always offered, even when it isn't in the list, so a model
+	 * swap can't silently change what gets sent.
+	 */
+	private renderEffortOptions(levels: ReasoningEffort[]): void {
+		const chosen = this.plugin.settings.reasoningEffort;
+		const values: ReasoningEffort[] = ['', ...levels];
+		if (chosen && !values.includes(chosen)) values.push(chosen);
+
+		this.effortEl.empty();
+		for (const value of values) {
+			this.effortEl.createEl('option', { value, text: effortLabel(value) });
+		}
+		this.effortEl.value = chosen;
+	}
+
+	/** Whether this panel is already living in its own window. */
+	private inPopoutWindow(): boolean {
+		try {
+			return this.leaf.getContainer() instanceof WorkspaceWindow;
+		} catch {
+			// A leaf with no container yet is, by definition, not in a popout.
+			return false;
+		}
+	}
+
+	/**
+	 * Move the panel into its own window. Obsidian rebuilds the view there, so
+	 * the conversation travels as view state (see getState/setState) and is read
+	 * back from its saved transcript.
+	 */
+	private popOut(): void {
+		if (this.busy) {
+			this.busyNotice();
+			return;
+		}
+		// The transcript is what travels, so without one the new window starts
+		// a fresh conversation. Say so rather than silently dropping it.
+		if (!this.plugin.settings.autoSaveConversations && this.history.length > 1) {
+			new Notice('Auto-save is off, so this conversation cannot follow the panel to a new window.');
+		}
+		try {
+			this.app.workspace.moveLeafToPopout(this.leaf);
+		} catch (e) {
+			new Notice(`Could not open a new window: ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+
+	/**
+	 * Remember which transcript is open, so the conversation survives being
+	 * moved to another window (and comes back when Obsidian restores the
+	 * workspace). Only the path travels — the transcript itself stays in the
+	 * vault instead of being copied into workspace.json.
+	 */
+	getState(): Record<string, unknown> {
+		return { ...super.getState(), conversationPath: this.conversationPath };
+	}
+
+	async setState(state: unknown, result: ViewStateResult): Promise<void> {
+		await super.setState(state, result);
+		const path = (state as { conversationPath?: unknown } | null)?.conversationPath;
+		if (typeof path !== 'string' || !path || path === this.conversationPath) return;
+		// State can arrive before the panel is built; onOpen picks it up then.
+		if (!this.mounted) {
+			this.pendingPath = path;
+			return;
+		}
+		await this.loadConversationPath(path);
+	}
+
+	/** Open the transcript at `path`, if it is still there. */
+	private async loadConversationPath(path: string): Promise<boolean> {
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (!(file instanceof TFile)) return false;
+		await this.openConversation(file);
+		return true;
+	}
+
+	/** Stop the streaming answer, or the workflow run, in progress. */
+	interrupt(): void {
+		if (this.workflowRun) {
+			this.workflowRun.stop();
+			this.sendBtn.disabled = true;
+			this.sendBtn.setText('Stopping…');
+			return;
+		}
+		if (!this.abort || this.abort.signal.aborted) return;
+		this.abort.abort();
+		this.setStatus('Stopping…');
+	}
+
+	/** Whether the user has text selected here — then Ctrl+C means "copy". */
+	private hasSelection(): boolean {
+		if (
+			this.containerEl.doc.activeElement === this.inputEl &&
+			this.inputEl.selectionStart !== this.inputEl.selectionEnd
+		) {
+			return true;
+		}
+		const selection = this.containerEl.win.getSelection();
+		if (!selection || selection.isCollapsed) return false;
+		// A leftover selection elsewhere in the app must not block stopping.
+		const node = selection.anchorNode;
+		return !!node && this.containerEl.contains(node);
+	}
+
+	private busyNotice(): void {
+		new Notice('Wait for the current response to finish, or stop it with Ctrl+C.');
+	}
+
 	private async resetConversation(): Promise<void> {
 		if (this.busy) {
-			new Notice('Wait for the current response to finish first.');
+			this.busyNotice();
 			return;
 		}
 		this.cancelPendingApprovals();
@@ -161,13 +380,17 @@ export class ChatView extends ItemView {
 		this.sessionWrites.clear();
 		this.sessionMcp.clear();
 		this.messagesEl.empty();
-		this.addInfo('New conversation. The agent can read and (within allowed folders) write your vault.');
+		this.followOutput = true;
+		addInfo(
+			this.messagesEl,
+			'New conversation. The agent can read and (within allowed folders) write your vault.',
+		);
 	}
 
 	/** Load a saved transcript back into the chat so it can be continued. */
 	private async openConversation(file: TFile): Promise<void> {
 		if (this.busy) {
-			new Notice('Wait for the current response to finish first.');
+			this.busyNotice();
 			return;
 		}
 		this.cancelPendingApprovals();
@@ -180,23 +403,28 @@ export class ChatView extends ItemView {
 		this.sessionWrites.clear();
 		this.sessionMcp.clear();
 		this.messagesEl.empty();
-		this.addInfo(`Continuing "${file.basename}".`);
+		this.followOutput = true;
+		addInfo(this.messagesEl, `Continuing "${file.basename}".`);
 		for (const m of messages) {
-			if (m.role === 'user') this.addUserBubble(m.content);
+			if (m.role === 'user') addUserBubble(this.messagesEl, m.content);
 			else if (m.role === 'assistant') await this.addAssistantBubble(m.content);
 		}
+		this.scrollToBottom(true);
 	}
 
 	/** Resolve any approval prompts still awaiting a click as denials. */
 	private cancelPendingApprovals(): void {
 		for (const resolve of this.pendingApprovals) resolve('deny');
 		this.pendingApprovals.clear();
+		this.approvedWrite = null;
 	}
 
 	/** Render an approval card and resolve when the user picks an option. */
 	private requestApproval(req: ApprovalRequest): Promise<ApprovalResult> {
 		return new Promise<ApprovalResult>((resolve) => {
 			this.pendingApprovals.add(resolve);
+			/** The diff shown for a pending write, relabelled once it is applied. */
+			let preview: HTMLElement | null = null;
 
 			const card = this.messagesEl.createDiv({ cls: 'va-approval' });
 			const head = card.createDiv({ cls: 'va-approval-head' });
@@ -217,12 +445,18 @@ export class ChatView extends ItemView {
 					text: `The agent wants to write outside your allowed folders (via ${req.tool}):`,
 				});
 				card.createEl('code', { cls: 'va-approval-path', text: req.path ?? '' });
+				// Decide on the actual change, not just the path.
+				if (req.preview) preview = addDiffPreview(card, req.preview.before, req.preview.after);
 			}
 
 			const row = card.createDiv({ cls: 'va-approval-actions' });
 			const settle = (result: ApprovalResult, label: string): void => {
 				if (!this.pendingApprovals.has(resolve)) return;
 				this.pendingApprovals.delete(resolve);
+				// An allowed write happens next; its diff is already on screen.
+				if (preview && req.preview && result !== 'deny') {
+					this.approvedWrite = { path: req.path ?? '', after: req.preview.after, card: preview };
+				}
 				row.empty();
 				card.addClass('va-approval-done');
 				card.createDiv({ cls: 'va-approval-choice', text: `→ ${label}` });
@@ -244,60 +478,99 @@ export class ChatView extends ItemView {
 				if (req.folder) addBtn(`Always: ${req.folder}/`, 'always-folder', 'va-always');
 			}
 
-			this.scrollToBottom();
+			// An approval needs an answer, so always bring it into view.
+			this.scrollToBottom(true);
 		});
 	}
 
-	private scrollToBottom(): void {
+	/** Scroll to the newest output, unless the user has scrolled up to read. */
+	private scrollToBottom(force = false): void {
+		if (!force && !this.followOutput) return;
+		this.followOutput = true;
 		this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
 	}
 
-	private addInfo(text: string): void {
-		this.messagesEl.createDiv({ cls: 'va-info', text });
-	}
-
-	private addUserBubble(text: string): void {
-		const bubble = this.messagesEl.createDiv({ cls: 'va-msg va-user' });
-		bubble.createDiv({ cls: 'va-role', text: 'You' });
-		bubble.createDiv({ cls: 'va-content', text });
-		this.scrollToBottom();
+	/** The one-line "what is happening" strip above the composer. */
+	private setStatus(text: string | null): void {
+		// While an answer can still be cut off, say how.
+		const stoppable = !!this.abort && !this.abort.signal.aborted;
+		this.statusEl.setText(text ? `${text}${stoppable ? ' · Ctrl+C to stop' : ''}` : '');
+		this.statusEl.toggleClass('va-hidden', !text);
 	}
 
 	private async addAssistantBubble(markdown: string): Promise<void> {
-		const bubble = this.messagesEl.createDiv({ cls: 'va-msg va-assistant' });
-		bubble.createDiv({ cls: 'va-role', text: 'Assistant' });
-		const content = bubble.createDiv({ cls: 'va-content' });
-		await MarkdownRenderer.render(this.app, markdown, content, '', this);
+		await addAssistantBubble(this.app, this, this.messagesEl, markdown);
 		this.scrollToBottom();
 	}
 
 	private addToolCall(call: ToolCall): void {
-		const details = this.messagesEl.createEl('details', { cls: 'va-tool' });
-		const summary = details.createEl('summary');
-		setIcon(summary.createSpan({ cls: 'va-tool-icon' }), 'wrench');
-		summary.createSpan({ text: ` ${call.name}` });
-		details.createEl('pre', { cls: 'va-tool-args', text: call.arguments });
-		this.toolEls.set(call.id, details);
+		this.toolEls.set(call.id, addToolCall(this.messagesEl, call));
+		this.setStatus(`Running ${call.name}…`);
 		this.scrollToBottom();
 	}
 
 	private addToolResult(call: ToolCall, result: string): void {
 		const details = this.toolEls.get(call.id);
 		if (!details) return;
-		const trimmed = result.length > 2000 ? result.slice(0, 2000) + '\n…(truncated)' : result;
-		details.createEl('pre', { cls: 'va-tool-result', text: trimmed });
+		addToolResult(details, result);
+		this.setStatus('Thinking…');
+		this.scrollToBottom();
+	}
+
+	/** Show what a write actually changed, as a diff. */
+	private addFileChange(change: FileChange): void {
+		const approved = this.approvedWrite;
+		if (approved && approved.path === change.path && approved.after === change.after) {
+			// This is the write the approval card already previewed.
+			markPreviewApplied(approved.card, change);
+			this.approvedWrite = null;
+			return;
+		}
+		addFileChange(this.messagesEl, change);
 		this.scrollToBottom();
 	}
 
 	private addError(message: string): void {
-		this.messagesEl.createDiv({ cls: 'va-error', text: `⚠️ ${message}` });
+		addError(this.messagesEl, message);
 		this.scrollToBottom();
 	}
 
+	/** Toggle the chat UI: Send becomes Stop while an answer is in flight. */
 	private setBusy(busy: boolean): void {
 		this.busy = busy;
-		this.sendBtn.disabled = busy;
-		this.sendBtn.setText(busy ? 'Thinking…' : 'Send');
+		this.sendBtn.disabled = false;
+		this.sendBtn.setText(busy ? 'Stop' : 'Send');
+		this.sendBtn.toggleClass('va-stop', busy);
+		this.sendBtn.onclick = busy ? () => this.interrupt() : () => void this.send();
+	}
+
+	/**
+	 * Where this conversation's transcript goes. With conversation naming on,
+	 * one extra cheap model call turns the opening exchange into a title;
+	 * otherwise (and whenever that call is skipped or fails) the first message
+	 * is used, as before.
+	 */
+	private async newConversationPath(firstMessage: string, interrupted: boolean): Promise<string> {
+		let label = '';
+		// Don't spend a call right after the user hit Stop, or on a turn that
+		// produced nothing to name.
+		if (this.plugin.settings.nameConversations && !interrupted) {
+			const answer = this.lastAssistantContent();
+			if (answer) {
+				this.setStatus('Naming the conversation…');
+				label = await suggestConversationTitle(this.plugin.settings, firstMessage, answer);
+			}
+		}
+		return newConversationPath(this.app, this.plugin.settings, label || firstMessage);
+	}
+
+	/** The most recent assistant answer in this conversation, if any. */
+	private lastAssistantContent(): string {
+		for (let i = this.history.length - 1; i >= 0; i--) {
+			const m = this.history[i];
+			if (m?.role === 'assistant' && m.content.trim()) return m.content;
+		}
+		return '';
 	}
 
 	private async send(): Promise<void> {
@@ -306,16 +579,15 @@ export class ChatView extends ItemView {
 		if (!text) return;
 
 		this.inputEl.value = '';
+		fitToContent(this.inputEl);
 		this.history.push({ role: 'user', content: text });
-		this.addUserBubble(text);
+		addUserBubble(this.messagesEl, text);
+		this.scrollToBottom(true);
 
-		if (!this.conversationPath) {
-			this.conversationPath = newConversationPath(this.plugin.settings, text);
-		}
-
+		const abort = new AbortController();
+		this.abort = abort;
 		this.setBusy(true);
-		const thinking = this.messagesEl.createDiv({ cls: 'va-info va-thinking', text: 'Thinking…' });
-		this.scrollToBottom();
+		this.setStatus('Thinking…');
 
 		const system = this.history[0];
 		if (system?.role === 'system') {
@@ -324,34 +596,69 @@ export class ChatView extends ItemView {
 			// strippers cut from their marker to the end.
 			let content = stripOpenFiles(stripPrePass(system.content));
 			content += buildOpenFilesBlock(this.app, this.plugin.settings);
-			if (this.plugin.settings.usePrePass) {
-				thinking.setText('Preparing context…');
+			if (this.plugin.settings.usePrePass && !abort.signal.aborted) {
+				this.setStatus('Preparing context…');
 				const block = await prepareContext(this.app, this.plugin.settings, this.plugin.rag, text);
 				if (block) content += block;
-				thinking.setText('Thinking…');
+				this.setStatus('Thinking…');
 			}
 			this.history[0] = { role: 'system', content };
 		}
 
-		await runAgent(
-			this.app,
-			this.plugin.settings,
-			() => this.plugin.saveSettings(),
-			this.plugin.mcp,
-			this.plugin.rag,
-			this.sessionWrites,
-			this.sessionMcp,
-			this.history,
-			{
-				onAssistant: (c) => void this.addAssistantBubble(c),
-				onToolCall: (call) => this.addToolCall(call),
-				onToolResult: (call, res) => this.addToolResult(call, res),
-				onError: (msg) => this.addError(msg),
-				requestApproval: (req) => this.requestApproval(req),
-			},
-		);
+		/** Set when a streamed turn already showed that it was cut short. */
+		let stopShown = false;
 
-		thinking.remove();
+		if (!abort.signal.aborted) {
+			await runAgent(
+				this.app,
+				this.plugin.settings,
+				() => this.plugin.saveSettings(),
+				this.plugin.mcp,
+				this.plugin.rag,
+				this.sessionWrites,
+				this.sessionMcp,
+				this.history,
+				{
+					onAssistant: (c) => void this.addAssistantBubble(c),
+					onToolCall: (call) => this.addToolCall(call),
+					onToolResult: (call, res) => this.addToolResult(call, res),
+					onError: (msg) => this.addError(msg),
+					onFileChange: (change) => this.addFileChange(change),
+					requestApproval: (req) => this.requestApproval(req),
+					stream: {
+						onStart: () => {
+							this.setStatus('Generating…');
+							this.turn = new AssistantTurn(this.app, this, this.messagesEl, {
+								expandThinking: this.plugin.settings.expandThinking,
+								onGrow: () => this.scrollToBottom(),
+							});
+						},
+						onContent: (delta) => this.turn?.pushContent(delta),
+						onReasoning: (delta) => this.turn?.pushReasoning(delta),
+						onReclassify: () => this.turn?.reclassifyAsReasoning(),
+						onDone: (info) => {
+							const turn = this.turn;
+							this.turn = null;
+							if (!turn) return;
+							if (info.aborted && turn.hasOutput()) stopShown = true;
+							void turn.finish(info);
+						},
+					},
+				},
+				{ signal: abort.signal },
+			);
+		}
+
+		if (abort.signal.aborted && !stopShown) addInfo(this.messagesEl, 'Stopped.');
+
+		// Name the file once, from the opening exchange — the answer says what
+		// the conversation turned out to be about better than the question does.
+		if (this.plugin.settings.autoSaveConversations && !this.conversationPath) {
+			this.conversationPath = await this.newConversationPath(text, abort.signal.aborted);
+		}
+
+		this.abort = null;
+		this.setStatus(null);
 		this.setBusy(false);
 
 		if (this.plugin.settings.autoSaveConversations && this.conversationPath) {
@@ -382,7 +689,7 @@ export class ChatView extends ItemView {
 	/** Open the workflow modal (also reachable via the "Run workflow" command). */
 	openWorkflowModal(preselectId?: string): void {
 		if (this.busy) {
-			new Notice('Wait for the current response to finish first.');
+			this.busyNotice();
 			return;
 		}
 		new WorkflowModal(
@@ -396,7 +703,7 @@ export class ChatView extends ItemView {
 	/** Host an autonomous workflow run in this panel until it pauses or finishes. */
 	async startWorkflow(start: WorkflowStart): Promise<void> {
 		if (this.busy) {
-			new Notice('Wait for the current response to finish first.');
+			this.busyNotice();
 			return;
 		}
 		// The run builds its own per-round context; reset the panel so any chat
@@ -416,12 +723,13 @@ export class ChatView extends ItemView {
 		}
 
 		const budget = start.maxRounds > 0 ? `${start.maxRounds} rounds` : 'until stopped';
-		this.addInfo(
+		addInfo(
+			this.messagesEl,
 			start.file
 				? `Resuming "${start.file.basename}" with ${start.workflow.name} (${budget}).`
 				: `${start.workflow.name} (${budget}): ${start.goal}`,
 		);
-		this.addInfo(`Progress is saved to "${path}".`);
+		addInfo(this.messagesEl, `Progress is saved to "${path}".`);
 
 		this.setRunBusy(true);
 		this.workflowRun = new WorkflowRun(
@@ -437,8 +745,9 @@ export class ChatView extends ItemView {
 				onToolCall: (call) => this.addToolCall(call),
 				onToolResult: (call, res) => this.addToolResult(call, res),
 				onError: (msg) => this.addError(msg),
+				onFileChange: (change) => this.addFileChange(change),
 				onInfo: (text) => {
-					this.addInfo(text);
+					addInfo(this.messagesEl, text);
 					this.scrollToBottom();
 				},
 				requestApproval: (req) => this.requestApproval(req),
@@ -458,17 +767,11 @@ export class ChatView extends ItemView {
 	private setRunBusy(busy: boolean): void {
 		this.busy = busy;
 		this.inputEl.disabled = busy;
-		this.inputEl.placeholder = busy
-			? 'Workflow run in progress…'
-			: 'Ask about your vault…  (Enter to send, Shift+Enter for newline)';
+		this.inputEl.placeholder = busy ? 'Workflow run in progress…' : PLACEHOLDER;
+		this.setStatus(busy ? 'Workflow run in progress…' : null);
 		this.sendBtn.disabled = false;
 		this.sendBtn.setText(busy ? 'Stop' : 'Send');
-		this.sendBtn.onclick = busy
-			? () => {
-					this.workflowRun?.stop();
-					this.sendBtn.disabled = true;
-					this.sendBtn.setText('Stopping…');
-				}
-			: () => void this.send();
+		this.sendBtn.toggleClass('va-stop', busy);
+		this.sendBtn.onclick = busy ? () => this.interrupt() : () => void this.send();
 	}
 }

@@ -1,6 +1,6 @@
 import { App, TFile, moment, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from '../settings';
-import { ApprovalRequest, ApprovalResult, ChatMessage, ToolCall } from '../types';
+import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
 import { ExtraTool, runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
 import { conversationSlug, ensureFolder } from '../conversation';
@@ -20,6 +20,8 @@ export interface WorkflowEvents {
 	onInfo(text: string): void;
 	/** Used only by steps with approvals: 'ask'; 'deny' steps never prompt. */
 	requestApproval?: (req: ApprovalRequest) => Promise<ApprovalResult>;
+	/** A file the run wrote, so the panel can show the diff. */
+	onFileChange?: (change: FileChange) => void;
 }
 
 export interface WorkflowRunOptions {
@@ -254,6 +256,7 @@ export class WorkflowRun {
 				onToolResult: (c, r) => this.events.onToolResult(c, r),
 				onError: (m) => this.events.onError(m),
 				requestApproval: askUser ?? (() => Promise.resolve('deny' as const)),
+				onFileChange: (c) => this.events.onFileChange?.(c),
 			},
 			{
 				extraTools: [this.finishTool()],
