@@ -11,7 +11,7 @@ import {
 } from 'obsidian';
 import type VaultAssistantPlugin from '../main';
 import { ReasoningEffort, effortLabel } from '../settings';
-import { EFFORT_LEVELS, serverEffortLevels } from '../api/props';
+import { COMMON_EFFORT_LEVELS, EFFORT_LEVELS, EffortSupport, serverEffortSupport } from '../api/props';
 import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
 import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
@@ -157,18 +157,14 @@ export class ChatView extends ItemView {
 				title: 'How hard a reasoning model should think (sent as reasoning_effort). Lower it when a model gets stuck thinking.',
 			},
 		});
-		this.renderEffortOptions(EFFORT_LEVELS);
+		this.renderEffortOptions({ kind: 'unknown' });
 		this.registerDomEvent(this.effortEl, 'change', () => {
 			this.plugin.settings.reasoningEffort = this.effortEl.value as ReasoningEffort;
 			void this.plugin.saveSettings();
 		});
 		// Narrow the list to what this model actually understands, if the
 		// endpoint is willing to say (llama.cpp is; most aren't).
-		void serverEffortLevels(this.plugin.settings.baseUrl, this.plugin.settings.apiKey).then(
-			(levels) => {
-				if (levels && this.mounted) this.renderEffortOptions(levels);
-			},
-		);
+		this.refreshEffortLevels();
 
 		this.messagesEl = root.createDiv({ cls: 'va-messages' });
 
@@ -255,14 +251,46 @@ export class ChatView extends ItemView {
 	}
 
 	/**
-	 * Fill the effort selector. `levels` is the model's own set when the
-	 * endpoint could tell us, otherwise every level llama.cpp documents. The
-	 * saved choice is always offered, even when it isn't in the list, so a model
-	 * swap can't silently change what gets sent.
+	 * Ask the endpoint again which effort levels its model has, and redraw the
+	 * selector. The panel narrows the list once when it opens, so a change of
+	 * endpoint or model leaves it describing the model that was there before.
 	 */
-	private renderEffortOptions(levels: ReasoningEffort[]): void {
+	refreshEffortLevels(): void {
+		void serverEffortSupport(this.plugin.settings.baseUrl, this.plugin.settings.apiKey).then(
+			(support) => {
+				if (this.mounted) this.renderEffortOptions(support);
+			},
+		);
+	}
+
+	/**
+	 * The levels worth offering for what the endpoint established — narrowed
+	 * only as far as it actually told us. A lookup that failed leaves every
+	 * level in place; a template that never reads `reasoning_effort` leaves
+	 * only `none`, which llama.cpp acts on itself before the template runs, so
+	 * it works even where the parameter itself does nothing.
+	 */
+	private offeredLevels(support: EffortSupport): ReasoningEffort[] {
+		switch (support.kind) {
+			case 'levels':
+				return ['none', ...support.levels];
+			case 'ignored':
+				return ['none'];
+			case 'unenumerated':
+				return COMMON_EFFORT_LEVELS;
+			case 'unknown':
+				return EFFORT_LEVELS;
+		}
+	}
+
+	/**
+	 * Fill the effort selector. The saved choice is always offered, even when
+	 * it isn't in the list, so a model swap can't silently change what gets
+	 * sent.
+	 */
+	private renderEffortOptions(support: EffortSupport): void {
 		const chosen = this.plugin.settings.reasoningEffort;
-		const values: ReasoningEffort[] = ['', ...levels];
+		const values: ReasoningEffort[] = ['', ...this.offeredLevels(support)];
 		if (chosen && !values.includes(chosen)) values.push(chosen);
 
 		this.effortEl.empty();

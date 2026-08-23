@@ -267,11 +267,20 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
+	/** The endpoint and model the effort lookup on file was made against. */
+	private effortKey = '';
+
 	private save = async () => {
-		// The endpoint or model may have just changed, so anything we worked out
-		// about what it serves is no longer trustworthy.
-		clearEffortCache();
 		await this.plugin.saveSettings();
+		// A changed endpoint or model invalidates everything we worked out about
+		// what it serves. Guarded because every keystroke in a text field lands
+		// here, and re-asking on each one would be a request per character.
+		const s = this.plugin.settings;
+		const key = `${canonicalUrl(s.baseUrl)}|${s.model.trim()}`;
+		if (key === this.effortKey) return;
+		this.effortKey = key;
+		clearEffortCache();
+		this.plugin.refreshEffortLevels();
 	};
 
 	/** Models each endpoint advertised, kept for as long as this tab lives. */
@@ -394,6 +403,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		const s = this.plugin.settings;
+		this.effortKey = `${canonicalUrl(s.baseUrl)}|${s.model.trim()}`;
 		containerEl.empty();
 		// Every picker below is rebuilt; drop the previous redraws with their
 		// now-detached containers.

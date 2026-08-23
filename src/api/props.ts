@@ -8,9 +8,16 @@
  * and since llama.cpp simply hands `reasoning_effort` to that template, the
  * template is the ground truth for which levels do anything at all.
  *
- * So this reads the template and looks for the level names llama.cpp
- * documents. It is a heuristic, and it says so: anything it cannot establish
- * comes back as null and the caller offers the full list instead.
+ * Templates come in two shapes, and only one of them can be read. A template
+ * that *branches* on the value (`{%- if reasoning_effort == 'high' %}`) names
+ * its levels outright. A template that *interpolates* it (gpt-oss:
+ * `"Reasoning: " + reasoning_effort`) accepts any string and means only what
+ * the model was trained on, which is nowhere in the file — an unknown level
+ * there is not ignored, it lands in the system message as `Reasoning: xhigh`.
+ *
+ * So the answer is deliberately four-way (see EffortSupport): the caller
+ * narrows what it offers only as far as the endpoint actually established,
+ * and a lookup that failed never passes for one that came back empty.
  */
 import { requestUrl } from 'obsidian';
 import { ReasoningEffort } from '../settings';
@@ -31,15 +38,44 @@ export const EFFORT_LEVELS: ReasoningEffort[] = [
 	'max',
 ];
 
+/**
+ * The levels a template can be read for. `none` is excluded because the server
+ * acts on it before the template runs: its absence from a template is not
+ * evidence the model lacks it, and its presence is not evidence of a level
+ * set. Callers offer it whenever the endpoint answered at all.
+ */
+const TEMPLATE_LEVELS = EFFORT_LEVELS.filter((l) => l !== 'none');
+
+/**
+ * Levels that essentially every model taking `reasoning_effort` has. Offered
+ * when the parameter demonstrably reaches the model but the template keeps
+ * the level set to itself.
+ */
+export const COMMON_EFFORT_LEVELS: ReasoningEffort[] = ['none', 'low', 'medium', 'high'];
+
 /** Fewer than this many hits is coincidence, not a set of levels. */
 const MIN_LEVELS = 2;
+
+/** Jinja delimiters: `{{ expr }}`, `{% statement %}`, `{# comment #}`. */
+const JINJA_BLOCK = /\{[{%#][\s\S]*?[}%#]\}/g;
+
+/** What an endpoint managed to establish about its model's effort levels. */
+export type EffortSupport =
+	/** The template branches on exactly these levels. */
+	| { kind: 'levels'; levels: ReasoningEffort[] }
+	/** The template never reads `reasoning_effort`: the parameter does nothing. */
+	| { kind: 'ignored' }
+	/** It reaches the model, but the template doesn't enumerate its levels. */
+	| { kind: 'unenumerated' }
+	/** The endpoint wouldn't say — nothing can be concluded either way. */
+	| { kind: 'unknown' };
 
 interface ServerProps {
 	chat_template?: string;
 }
 
 /** One lookup per endpoint, shared between callers and kept for the session. */
-const cache = new Map<string, Promise<ReasoningEffort[] | null>>();
+const cache = new Map<string, Promise<EffortSupport>>();
 
 /** The server root: /props sits beside /v1, not inside it. */
 function propsUrl(baseUrl: string): string {
@@ -48,27 +84,39 @@ function propsUrl(baseUrl: string): string {
 }
 
 /**
- * The levels a chat template reacts to, or null when the template doesn't
- * mention `reasoning_effort` at all (so nothing can be concluded).
+ * The levels quoted inside Jinja blocks that mention `reasoning_effort`.
+ * Scoping it that way is what makes the count mean something: a level word
+ * loose in the template — another kwarg's docs, a tool name, prose inside a
+ * system-prompt string — is not a branch on the effort and must not count.
  */
-export function effortLevelsInTemplate(template: string): ReasoningEffort[] | null {
-	if (!/reasoning_effort/i.test(template)) return null;
-	// Quoted, so Jinja's own `none` and the `max` filter don't count.
-	const found = EFFORT_LEVELS.filter((level) =>
-		new RegExp(`['"]${level}['"]`, 'i').test(template),
-	);
-	return found.length >= MIN_LEVELS ? found : null;
+function branchLevels(template: string): ReasoningEffort[] {
+	const found = new Set<ReasoningEffort>();
+	for (const block of template.match(JINJA_BLOCK) ?? []) {
+		if (!/reasoning_effort/i.test(block)) continue;
+		for (const level of TEMPLATE_LEVELS) {
+			// Quoted, so Jinja's own `none` and the `max` filter don't count.
+			if (new RegExp(`['"]${level}['"]`, 'i').test(block)) found.add(level);
+		}
+	}
+	return TEMPLATE_LEVELS.filter((l) => found.has(l));
+}
+
+/** What a chat template says about the levels its model understands. */
+export function effortSupportInTemplate(template: string): EffortSupport {
+	// A mention anywhere counts, comments included: a template that documents
+	// the parameter without branching on it is unreadable, not proof of
+	// anything, and calling that "ignored" would take options away wrongly.
+	if (!/reasoning_effort/i.test(template)) return { kind: 'ignored' };
+	const levels = branchLevels(template);
+	return levels.length >= MIN_LEVELS ? { kind: 'levels', levels } : { kind: 'unenumerated' };
 }
 
 /**
- * Ask the endpoint which effort levels its model understands. Returns null
- * whenever that can't be established — a server without /props, a template
- * that ignores the parameter, or any failure at all.
+ * Ask the endpoint which effort levels its model understands. Anything that
+ * stops us reading a template — a server without /props, a refusal, a body we
+ * can't parse — comes back as 'unknown' rather than as an empty answer.
  */
-export function serverEffortLevels(
-	baseUrl: string,
-	apiKey: string,
-): Promise<ReasoningEffort[] | null> {
+export function serverEffortSupport(baseUrl: string, apiKey: string): Promise<EffortSupport> {
 	const url = propsUrl(baseUrl);
 	const hit = cache.get(url);
 	if (hit) return hit;
@@ -84,15 +132,20 @@ export function serverEffortLevels(
 		},
 		() => directRequest({ url, method: 'GET', headers }),
 	)
-		.then((res) => {
-			if (res.status >= 400) return null;
+		.then((res): EffortSupport => {
+			if (res.status >= 400) return { kind: 'unknown' };
 			const props = JSON.parse(res.text) as ServerProps;
-			return effortLevelsInTemplate(props?.chat_template ?? '');
+			// A /props without a template is a server we can't read, not a
+			// model that ignores the parameter.
+			const template = props?.chat_template;
+			return typeof template === 'string' && template
+				? effortSupportInTemplate(template)
+				: { kind: 'unknown' };
 		})
-		.catch((e: unknown) => {
+		.catch((e: unknown): EffortSupport => {
 			// Endpoints that don't serve /props are the common case, not an error.
 			console.debug('[vault-assistant] No effort levels from', url, describeRequestError(e, url));
-			return null;
+			return { kind: 'unknown' };
 		});
 
 	cache.set(url, lookup);
