@@ -411,6 +411,34 @@
 	width: 100%;
 }
 
+/*
+ * A setting whose control is an editor rather than a widget. Obsidian lays a
+ * setting out as a row and gives the control what the name and description
+ * leave over, which is about half the pane — too narrow for pretty-printed
+ * JSON or a prompt, where the wrapping is what makes it unreadable, not the
+ * height. Stacking puts the field on a line of its own at full width.
+ */
+.va-block-setting {
+	display: block;
+}
+
+.va-block-setting .setting-item-control {
+	padding-top: 8px;
+	width: 100%;
+}
+
+/* The row layout's gutter between the two halves is a stray indent once they
+   are stacked. */
+.va-block-setting .setting-item-info {
+	margin-right: 0;
+}
+
+/* Named through the control as well: Obsidian styles its own settings fields
+   as `.setting-item-control textarea`, which outranks a lone class. */
+.va-block-setting .setting-item-control textarea {
+	width: 100%;
+}
+
 .va-settings-error:not(:empty) {
 	color: var(--text-error);
 	font-size: var(--font-ui-smaller);

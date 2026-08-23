@@ -1043,12 +1043,14 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		const err = containerEl.createDiv({ cls: 'va-settings-error' });
 
 		new Setting(containerEl)
+			.setClass('va-block-setting')
 			.setName('Server definitions')
 			.setDesc(
 				'JSON array of MCP servers. Each: {"id","name","enabled":true,"trusted":false,"transport":"stdio","command":"npx","args":[...],"env":{}}, {"transport":"http","url":"https://…","headers":{}}, or {"transport":"plugin","pluginId":"obsidian-life-tracker"} (another installed plugin’s tool api, called in-process — works on mobile). stdio servers run only on desktop. Trusted servers’ tools run without an approval prompt.',
 			)
 			.addTextArea((t) => {
-				t.inputEl.rows = 8;
+				// The seeded entry alone is ten lines of pretty-printed JSON.
+				t.inputEl.rows = 14;
 				t.inputEl.addClass('va-wide-textarea');
 				t.setValue(JSON.stringify(s.mcpServers, null, 2)).onChange(async (v) => {
 					err.setText('');
@@ -1080,12 +1082,15 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		new Setting(containerEl).setName('Agent prompt').setHeading();
 
 		new Setting(containerEl)
+			.setClass('va-block-setting')
 			.setName('System prompt')
 			.setDesc(
 				'Base instructions for the agent. Current folders and permissions are appended automatically.',
 			)
 			.addTextArea((t) => {
-				t.inputEl.rows = 8;
+				// The default prompt wraps to about thirty lines at this width;
+				// showing all of it would swallow the pane, so this is most of it.
+				t.inputEl.rows = 20;
 				t.inputEl.addClass('va-wide-textarea');
 				t.setValue(s.systemPrompt).onChange(async (v) => {
 					s.systemPrompt = v;
