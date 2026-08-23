@@ -10,7 +10,8 @@ import {
 	setIcon,
 } from 'obsidian';
 import type VaultAssistantPlugin from '../main';
-import { EFFORT_OPTIONS, ReasoningEffort } from '../settings';
+import { ReasoningEffort, effortLabel } from '../settings';
+import { EFFORT_LEVELS, serverEffortLevels } from '../api/props';
 import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
 import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
@@ -60,6 +61,7 @@ export class ChatView extends ItemView {
 	private messagesEl!: HTMLElement;
 	private statusEl!: HTMLElement;
 	private inputEl!: HTMLTextAreaElement;
+	private effortEl!: HTMLSelectElement;
 	private sendBtn!: HTMLButtonElement;
 	private toolEls = new Map<string, HTMLElement>();
 	/** Write paths the user approved for the rest of this conversation. */
@@ -148,21 +150,25 @@ export class ChatView extends ItemView {
 
 		// How hard the model should think. "Default" sends nothing, so endpoints
 		// that don't know reasoning_effort never see it.
-		const effort = header.createEl('select', {
+		this.effortEl = header.createEl('select', {
 			cls: 'dropdown va-effort',
 			attr: {
 				'aria-label': 'Reasoning effort',
 				title: 'How hard a reasoning model should think (sent as reasoning_effort). Lower it when a model gets stuck thinking.',
 			},
 		});
-		for (const option of EFFORT_OPTIONS) {
-			effort.createEl('option', { value: option.value, text: option.label });
-		}
-		effort.value = this.plugin.settings.reasoningEffort;
-		this.registerDomEvent(effort, 'change', () => {
-			this.plugin.settings.reasoningEffort = effort.value as ReasoningEffort;
+		this.renderEffortOptions(EFFORT_LEVELS);
+		this.registerDomEvent(this.effortEl, 'change', () => {
+			this.plugin.settings.reasoningEffort = this.effortEl.value as ReasoningEffort;
 			void this.plugin.saveSettings();
 		});
+		// Narrow the list to what this model actually understands, if the
+		// endpoint is willing to say (llama.cpp is; most aren't).
+		void serverEffortLevels(this.plugin.settings.baseUrl, this.plugin.settings.apiKey).then(
+			(levels) => {
+				if (levels && this.mounted) this.renderEffortOptions(levels);
+			},
+		);
 
 		this.messagesEl = root.createDiv({ cls: 'va-messages' });
 
@@ -233,6 +239,7 @@ export class ChatView extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
+		this.mounted = false;
 		this.abort?.abort();
 		this.abort = null;
 		this.turn?.dispose();
@@ -245,6 +252,24 @@ export class ChatView extends ItemView {
 	/** True while a message or workflow run is in flight. */
 	isBusy(): boolean {
 		return this.busy;
+	}
+
+	/**
+	 * Fill the effort selector. `levels` is the model's own set when the
+	 * endpoint could tell us, otherwise every level llama.cpp documents. The
+	 * saved choice is always offered, even when it isn't in the list, so a model
+	 * swap can't silently change what gets sent.
+	 */
+	private renderEffortOptions(levels: ReasoningEffort[]): void {
+		const chosen = this.plugin.settings.reasoningEffort;
+		const values: ReasoningEffort[] = ['', ...levels];
+		if (chosen && !values.includes(chosen)) values.push(chosen);
+
+		this.effortEl.empty();
+		for (const value of values) {
+			this.effortEl.createEl('option', { value, text: effortLabel(value) });
+		}
+		this.effortEl.value = chosen;
 	}
 
 	/** Whether this panel is already living in its own window. */
