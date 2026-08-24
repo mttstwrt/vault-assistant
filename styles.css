@@ -201,12 +201,22 @@
 	font-style: italic;
 }
 
+/*
+ * An error is prose the reader has to work through — the endpoint's own
+ * message, usually a status code and a scrap of body. Obsidian's
+ * --background-modifier-error is the same red as --text-error, so filling the
+ * card with one and writing in the other cancels out. Shaped like the approval
+ * card instead, which is the same sort of notice in the same stream: the red
+ * edge says which kind it is, and the text is left at reading contrast.
+ */
 .va-error {
 	font-size: var(--font-ui-small);
-	color: var(--text-error);
-	background: var(--background-modifier-error);
+	color: var(--text-normal);
+	border: 1px solid var(--text-error);
+	border-left-width: 3px;
 	border-radius: 8px;
 	padding: 8px 10px;
+	background: var(--background-secondary);
 }
 
 .va-tool {
