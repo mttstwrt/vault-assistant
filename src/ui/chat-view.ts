@@ -11,7 +11,14 @@ import {
 } from 'obsidian';
 import type VaultAssistantPlugin from '../main';
 import { ReasoningEffort, effortLabel } from '../settings';
-import { COMMON_EFFORT_LEVELS, EFFORT_LEVELS, EffortSupport, serverEffortSupport } from '../api/props';
+import {
+	COMMON_EFFORT_LEVELS,
+	EFFORT_LEVELS,
+	EffortSupport,
+	clearEffortCache,
+	serverEffortSupport,
+} from '../api/props';
+import { discoverModels, filterModels, modelLabel } from '../api/models';
 import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
 import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
@@ -61,6 +68,7 @@ export class ChatView extends ItemView {
 	private messagesEl!: HTMLElement;
 	private statusEl!: HTMLElement;
 	private inputEl!: HTMLTextAreaElement;
+	private modelEl!: HTMLSelectElement;
 	private effortEl!: HTMLSelectElement;
 	private sendBtn!: HTMLButtonElement;
 	private toolEls = new Map<string, HTMLElement>();
@@ -148,9 +156,28 @@ export class ChatView extends ItemView {
 		setIcon(workflowBtn, 'telescope');
 		workflowBtn.onclick = () => this.openWorkflowModal();
 
+		// The two dropdowns wrap as a pair: on a narrow panel they take a line
+		// of their own together, rather than the model staying up with the
+		// buttons and leaving the effort selector stranded below it.
+		const controls = header.createDiv({ cls: 'va-controls' });
+
+		// Which model answers. The endpoint's own list when it has one, and
+		// always the configured name — an endpoint that can't list models still
+		// shows what it is set to rather than going blank.
+		this.modelEl = controls.createEl('select', {
+			cls: 'dropdown va-model',
+			attr: {
+				'aria-label': 'Model',
+				title: 'The model this chat sends to. The endpoint that serves it is set in settings.',
+			},
+		});
+		this.renderModelOptions([]);
+		this.registerDomEvent(this.modelEl, 'change', () => void this.applyModel(this.modelEl.value));
+		this.refreshModels();
+
 		// How hard the model should think. "Default" sends nothing, so endpoints
 		// that don't know reasoning_effort never see it.
-		this.effortEl = header.createEl('select', {
+		this.effortEl = controls.createEl('select', {
 			cls: 'dropdown va-effort',
 			attr: {
 				'aria-label': 'Reasoning effort',
@@ -248,6 +275,52 @@ export class ChatView extends ItemView {
 	/** True while a message or workflow run is in flight. */
 	isBusy(): boolean {
 		return this.busy;
+	}
+
+	/**
+	 * Re-read everything the header shows about the endpoint. Called when the
+	 * endpoint or model changes in settings, which the panel has no other way
+	 * to notice.
+	 */
+	refreshEndpointControls(): void {
+		this.refreshModels();
+		this.refreshEffortLevels();
+	}
+
+	/** Look up the endpoint's models again and redraw the selector. */
+	refreshModels(): void {
+		void discoverModels(this.plugin.settings.baseUrl, this.plugin.settings.apiKey).then((ids) => {
+			if (this.mounted) this.renderModelOptions(filterModels(ids, 'chat'));
+		});
+	}
+
+	/**
+	 * Fill the model selector. The configured name is always offered, even when
+	 * the endpoint didn't list it, so a name typed into settings stays selected
+	 * instead of being silently swapped for whatever the endpoint listed first.
+	 */
+	private renderModelOptions(models: string[]): void {
+		const current = this.plugin.settings.model;
+		this.modelEl.empty();
+		if (!models.includes(current)) {
+			this.modelEl.createEl('option', {
+				value: current,
+				text: current ? modelLabel(current) : '(no model set)',
+			});
+		}
+		for (const id of models) this.modelEl.createEl('option', { value: id, text: modelLabel(id) });
+		this.modelEl.value = current;
+	}
+
+	/**
+	 * Switch model. Effort levels belong to the model rather than the endpoint,
+	 * so what was worked out for the last one no longer holds.
+	 */
+	private async applyModel(id: string): Promise<void> {
+		this.plugin.settings.model = id;
+		await this.plugin.saveSettings();
+		clearEffortCache();
+		this.refreshEffortLevels();
 	}
 
 	/**

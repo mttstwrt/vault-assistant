@@ -4,6 +4,11 @@
  * when it is running as a router), Ollama lists what you have pulled, and
  * LM Studio, OpenAI and OpenRouter list their catalogue. Endpoints that don't
  * implement it are no worse off — the model name stays a text field.
+ *
+ * Two callers want the list on different terms. The settings tab shows why a
+ * lookup failed, so it calls `listModels` and keeps the error. The chat panel
+ * only fills a dropdown and always offers the configured name anyway, so it
+ * calls `discoverModels`, which is cached per endpoint and quiet.
  */
 import { requestUrl } from 'obsidian';
 import { describeRequestError, directRequest, withDirectRetry } from './node-http';
@@ -80,4 +85,30 @@ export function filterModels(ids: string[], kind: 'chat' | 'embed'): string[] {
 export function modelLabel(id: string): string {
 	const name = id.split(/[\\/]/).pop() ?? id;
 	return name.replace(/\.gguf$/i, '') || id;
+}
+
+/** One lookup per endpoint, shared between panels and kept for the session. */
+const cache = new Map<string, Promise<string[]>>();
+
+/**
+ * The models an endpoint serves, for a caller with nothing to say about
+ * failure: an endpoint that doesn't implement /models, or can't be reached,
+ * comes back as an empty list rather than an error.
+ */
+export function discoverModels(baseUrl: string, apiKey: string): Promise<string[]> {
+	const url = baseUrl.trim().replace(/\/+$/, '');
+	const hit = cache.get(url);
+	if (hit) return hit;
+
+	const lookup = listModels(url, apiKey).catch((e: unknown) => {
+		console.debug('[vault-assistant] No model list from', url, e);
+		return [];
+	});
+	cache.set(url, lookup);
+	return lookup;
+}
+
+/** Forget what an endpoint listed, so a model loaded since can be picked up. */
+export function clearModelCache(): void {
+	cache.clear();
 }

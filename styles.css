@@ -25,12 +25,32 @@
 	color: var(--text-muted);
 }
 
+/* The dropdowns travel together, so a panel too narrow for both on the header
+   line puts the pair on the next one instead of splitting them across two. */
+.va-controls {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	min-width: 0;
+}
+
+/* The two header dropdowns. Both cap their width and shrink before they wrap,
+   so a model id long enough to fill the panel truncates instead. */
+.va-model,
 .va-effort {
 	flex: 0 1 auto;
-	max-width: 11em;
 	height: auto;
 	padding: 2px 22px 2px 6px;
 	font-size: var(--font-ui-smaller);
+	text-overflow: ellipsis;
+}
+
+.va-model {
+	max-width: 12em;
+}
+
+.va-effort {
+	max-width: 11em;
 }
 
 .va-new {

@@ -1,12 +1,9 @@
 import { App, PluginSettingTab, Setting, TextComponent } from 'obsidian';
 import type VaultAssistantPlugin from './main';
-import { filterModels, listModels, modelLabel } from './api/models';
+import { clearModelCache, filterModels, listModels, modelLabel } from './api/models';
 import { clearEffortCache } from './api/props';
 import { loadWorkflows } from './workflows/schema';
 import { WORKFLOW_PRESETS } from './workflows/presets';
-
-/** The two model fields that can be filled from a discovered list. */
-type PickerKind = 'chat' | 'embed';
 
 /**
  * How hard a reasoning model should think, sent as `reasoning_effort`.
@@ -267,20 +264,25 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
-	/** The endpoint and model the effort lookup on file was made against. */
-	private effortKey = '';
+	/** What the open panels' header controls were last worked out for. */
+	private lastEndpoint = '';
+	private lastModel = '';
 
 	private save = async () => {
 		await this.plugin.saveSettings();
-		// A changed endpoint or model invalidates everything we worked out about
-		// what it serves. Guarded because every keystroke in a text field lands
-		// here, and re-asking on each one would be a request per character.
+		// Guarded because every keystroke in a text field lands here, and
+		// re-asking on each one would be a request per character.
 		const s = this.plugin.settings;
-		const key = `${canonicalUrl(s.baseUrl)}|${s.model.trim()}`;
-		if (key === this.effortKey) return;
-		this.effortKey = key;
+		const url = canonicalUrl(s.baseUrl);
+		const model = s.model.trim();
+		if (url === this.lastEndpoint && model === this.lastModel) return;
+		// A different endpoint serves a different list of models; effort levels
+		// belong to the model, so either change invalidates those.
+		if (url !== this.lastEndpoint) clearModelCache();
+		this.lastEndpoint = url;
+		this.lastModel = model;
 		clearEffortCache();
-		this.plugin.refreshEffortLevels();
+		this.plugin.refreshEndpointControls();
 	};
 
 	/** Models each endpoint advertised, kept for as long as this tab lives. */
@@ -289,18 +291,18 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 	private discoveryState = new Map<string, string>();
 	/** Endpoints with a request in flight, so a redraw doesn't fire another. */
 	private discovering = new Set<string>();
-	/** The live redraw for each picker, so a finished lookup can refresh it. */
-	private pickers = new Map<PickerKind, () => void>();
+	/** The embedding picker's redraw, so a finished lookup can refresh it. */
+	private redrawPicker: (() => void) | null = null;
 
 	/**
-	 * Offer the models an endpoint advertises, as a dropdown once there is more
-	 * than one. Discovery runs when the settings tab is opened; editing the URL
-	 * doesn't re-run it (that would fire a request per keystroke), so the
-	 * refresh button next to the field is the way to look again.
+	 * Offer the embedding models an endpoint advertises, as a dropdown once
+	 * there is more than one. Discovery runs when the settings tab is opened;
+	 * editing the URL doesn't re-run it (that would fire a request per
+	 * keystroke), so the refresh button next to the field is the way to look
+	 * again. The chat model is chosen in the chat panel instead.
 	 */
 	private renderModelPicker(
 		container: HTMLElement,
-		kind: PickerKind,
 		opts: {
 			endpoint: () => { url: string; key: string };
 			current: () => string;
@@ -317,12 +319,12 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 				this.discover(url, key);
 			}
 
-			const models = filterModels(this.discovered.get(url) ?? [], kind);
+			const models = filterModels(this.discovered.get(url) ?? [], 'embed');
 			const current = opts.current();
 
 			if (models.length > 1) {
 				new Setting(container)
-					.setName(kind === 'chat' ? 'Available models' : 'Available embedding models')
+					.setName('Available embedding models')
 					.setDesc(`${models.length} models detected at ${url}.`)
 					.addDropdown((d) => {
 						// Keep a hand-typed name selectable, so picking from the
@@ -339,7 +341,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 			} else if (models.length === 1) {
 				const only = models[0] ?? '';
 				const row = new Setting(container)
-					.setName(kind === 'chat' ? 'Available model' : 'Available embedding model')
+					.setName('Available embedding model')
 					.setDesc(`The endpoint serves one model: ${only}`);
 				if (only !== current) {
 					row.addButton((b) =>
@@ -355,15 +357,11 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 			if (state) container.createDiv({ cls: 'va-rag-status', text: state });
 		};
 
-		this.pickers.set(kind, render);
+		this.redrawPicker = render;
 		render();
 	}
 
-	/**
-	 * Look up one endpoint's models, then redraw the pickers. Both pickers are
-	 * redrawn because they often share an endpoint — the embeddings fields
-	 * default to the chat endpoint — and one lookup answers for both.
-	 */
+	/** Look up one endpoint's models, then redraw the picker showing them. */
 	private discover(url: string, key: string): void {
 		if (this.discovering.has(url)) return;
 		this.discovering.add(url);
@@ -384,30 +382,33 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 			})
 			.finally(() => {
 				this.discovering.delete(url);
-				this.redrawPickers();
+				this.redrawPicker?.();
 			});
 	}
 
-	/** Forget what an endpoint said and ask it again (the refresh button). */
+	/**
+	 * Forget what an endpoint said and ask it again (the refresh buttons). The
+	 * chat panel's own list is cleared too, since both come from the same
+	 * endpoint and a model loaded since should show up in either.
+	 */
 	private rediscover(configured: string): void {
 		const url = canonicalUrl(configured);
 		this.discovered.delete(url);
 		this.discoveryState.delete(url);
-		this.redrawPickers();
-	}
-
-	private redrawPickers(): void {
-		for (const render of this.pickers.values()) render();
+		clearModelCache();
+		this.plugin.refreshEndpointControls();
+		this.redrawPicker?.();
 	}
 
 	display(): void {
 		const { containerEl } = this;
 		const s = this.plugin.settings;
-		this.effortKey = `${canonicalUrl(s.baseUrl)}|${s.model.trim()}`;
+		this.lastEndpoint = canonicalUrl(s.baseUrl);
+		this.lastModel = s.model.trim();
 		containerEl.empty();
-		// Every picker below is rebuilt; drop the previous redraws with their
-		// now-detached containers.
-		this.pickers.clear();
+		// The picker below is rebuilt; drop the previous redraw with its
+		// now-detached container.
+		this.redrawPicker = null;
 
 		new Setting(containerEl).setName('Model endpoint').setHeading();
 
@@ -439,35 +440,26 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 					});
 			});
 
-		let modelText: TextComponent | null = null;
 		new Setting(containerEl)
 			.setName('Model')
-			.setDesc('Model name as your endpoint expects it. Detected models are offered below.')
-			.addText((t) => {
-				modelText = t;
-				t.setPlaceholder('llama3.1')
+			.setDesc(
+				'Model name as your endpoint expects it. Detected models are offered in the chat panel\u2019s model selector; type one here when your endpoint cannot list them.',
+			)
+			.addText((t) =>
+				t
+					.setPlaceholder('llama3.1')
 					.setValue(s.model)
 					.onChange(async (v) => {
 						s.model = v.trim();
 						await this.save();
-					});
-			})
+					}),
+			)
 			.addExtraButton((b) =>
 				b
 					.setIcon('refresh-cw')
-					.setTooltip('Detect models from the endpoint')
+					.setTooltip('Detect models from the endpoint again')
 					.onClick(() => this.rediscover(s.baseUrl)),
 			);
-
-		this.renderModelPicker(containerEl.createDiv(), 'chat', {
-			endpoint: () => ({ url: s.baseUrl, key: s.apiKey }),
-			current: () => s.model,
-			apply: async (id) => {
-				s.model = id;
-				modelText?.setValue(id);
-				await this.save();
-			},
-		});
 
 		new Setting(containerEl)
 			.setName('Temperature')
@@ -929,7 +921,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 						.onClick(() => this.rediscover(s.embedBaseUrl || s.baseUrl)),
 				);
 
-			this.renderModelPicker(containerEl.createDiv(), 'embed', {
+			this.renderModelPicker(containerEl.createDiv(), {
 				endpoint: () => ({
 					url: s.embedBaseUrl || s.baseUrl,
 					key: s.embedApiKey || s.apiKey,

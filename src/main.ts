@@ -281,14 +281,15 @@ export default class VaultAssistantPlugin extends Plugin {
 	}
 
 	/**
-	 * Have every open chat panel re-ask the endpoint which effort levels its
-	 * model has. A panel works that out once, when it opens, so without this a
-	 * model swap leaves it offering the levels of the model that was there
-	 * before. Every leaf, not the first: a popped-out panel is another one.
+	 * Have every open chat panel re-read the endpoint: which models it serves,
+	 * and which effort levels the chosen one has. A panel works both out when
+	 * it opens, so without this a change of endpoint in settings leaves it
+	 * describing the one that was there before. Every leaf, not the first: a
+	 * popped-out panel is another one.
 	 */
-	refreshEffortLevels(): void {
+	refreshEndpointControls(): void {
 		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CHAT)) {
-			if (leaf.view instanceof ChatView) leaf.view.refreshEffortLevels();
+			if (leaf.view instanceof ChatView) leaf.view.refreshEndpointControls();
 		}
 	}
 
