@@ -87,6 +87,12 @@ export class ChatView extends ItemView {
 	private turn: AssistantTurn | null = null;
 	/** The pre-pass's own thinking section, while one is running. */
 	private prepass: ThinkingSection | null = null;
+	/**
+	 * What the last pre-pass collected. Kept across turns: a pass that skips has
+	 * decided the answer already has what it needs, and the notes it means are
+	 * these — dropping them would answer the follow-up with the material gone.
+	 */
+	private prePassBlock: string | null = null;
 	/** False once the user scrolls up, so streaming output stops yanking the view. */
 	private followOutput = true;
 	/** True once onOpen has built the panel, so setState knows whether to wait. */
@@ -485,6 +491,8 @@ export class ChatView extends ItemView {
 		this.toolEls.clear();
 		this.sessionWrites.clear();
 		this.sessionMcp.clear();
+		// Collected notes belong to the conversation that collected them.
+		this.prePassBlock = null;
 		this.messagesEl.empty();
 		this.followOutput = true;
 		addInfo(
@@ -508,6 +516,8 @@ export class ChatView extends ItemView {
 		this.toolEls.clear();
 		this.sessionWrites.clear();
 		this.sessionMcp.clear();
+		// Collected notes belong to the conversation that collected them.
+		this.prePassBlock = null;
 		this.messagesEl.empty();
 		this.followOutput = true;
 		addInfo(this.messagesEl, `Continuing "${file.basename}".`);
@@ -723,6 +733,12 @@ export class ChatView extends ItemView {
 					this.plugin.rag,
 					text,
 					{
+						// Everything before the message just pushed, so the pass
+						// can tell a follow-up from a new subject.
+						recent: this.history.slice(1, -1),
+						previousHandover: this.prePassBlock ?? undefined,
+					},
+					{
 						// Each round is a separate generation; run them together
 						// and the reasoning reads as one long sentence.
 						onStep: () => section.pushStepBreak(),
@@ -734,11 +750,14 @@ export class ChatView extends ItemView {
 					abort.signal,
 				);
 				section.close();
-				// A model that shows no reasoning and a pre-pass that found no
-				// queries leave an empty section behind; take it back out.
+				// A model that shows no reasoning and a pass that skipped in one
+				// call leave an empty section behind; take it back out.
 				if (section.isEmpty()) section.remove();
 				this.prepass = null;
-				if (block) content += block;
+				// A pass that collected nothing leaves the last one's findings in
+				// place rather than answering a follow-up without them.
+				if (block) this.prePassBlock = block;
+				if (this.prePassBlock) content += this.prePassBlock;
 				this.setStatus('Thinking…');
 			}
 			this.history[0] = { role: 'system', content };

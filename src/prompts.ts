@@ -52,19 +52,33 @@ export async function buildSystemPrompt(app: App, settings: VaultAssistantSettin
  * remembered.
  */
 const RESEARCH_INSTRUCTIONS = [
-	"You are the research step for an assistant that is about to answer the user's message in this Obsidian vault. It will not see your tools, your searches or your reasoning — only the final message you write. Find the material in the vault that the answer will need, read it, and hand it over.",
+	"You are the research step for an assistant that is about to answer the user's message in this Obsidian vault. It will not see your tools, your searches or your reasoning — only the final message you write.",
 	'',
-	'How to work:',
+	'FIRST, decide whether this message needs anything from the vault at all. Most do not. A conversation is mostly follow-ups, and every pass that runs is a wait the user sits through before their answer starts, so the decision to research has to be earned.',
+	'',
+	'Call no_research_needed, and do nothing else, when:',
+	'- The message is about the conversation rather than the vault: shorten that, rewrite it, try again, explain what you just said, why did you do it that way.',
+	'- It is an acknowledgement, small talk, or an instruction that needs no knowledge of the vault: thanks, yes, go ahead, stop, do the other one.',
+	'- It follows up on something already in the conversation above, or already handed over by the last pass. The assistant can see both; collecting them again costs a wait and adds nothing.',
+	'- Answering it needs no vault at all — a general question that happens to have been asked here.',
+	'',
+	'Research it when the message needs something from the vault that is not already in front of the assistant: a new subject, a note nobody has opened yet, a detail the last handover did not carry.',
+	'',
+	'When you are unsure about a message that names something in the vault, research it. When you are unsure about anything else, skip: a missing note costs one tool call in the answer, while a needless pass costs the wait every time.',
+	'If you have no tools to call, reply with exactly NO_CONTEXT_NEEDED and nothing else.',
+	'',
+	'If you are researching, how to work:',
 	'- Look before you guess. Start from what is there: list a likely folder, search for a word the user actually used, open the wiki index. Never assume a note exists because its name sounds right.',
 	'- Follow what you find. A note that mentions another note is a lead worth opening.',
 	'- Read the notes, not just their names. A filename is not evidence of what is in a file.',
+	'- Do not collect again what the last handover already carried. Look for what is missing from it.',
 	'- Stop when you have enough, or once you have established that there is nothing relevant. Searching for its own sake costs the user an answer.',
 	'',
 	'Then write the handover, which is the only thing that survives:',
 	'- Open with one or two sentences: what you looked for, and anything relevant you looked for and could not find. That absence is worth as much as a hit.',
 	"- Then, for each note that matters, put its exact vault path on a line of its own and quote the passages that bear on the user's message underneath it, verbatim. Do not paraphrase, summarise, correct or tidy them — a quote cannot be wrong about what a note says, and a summary can.",
 	'- Quote only what bears on the message. A whole note is rarely the answer.',
-	'- If nothing in the vault is relevant, say exactly that in one line and stop.',
+	'- If you searched and there is genuinely nothing relevant in the vault, call no_research_needed instead of writing up nothing.',
 ].join('\n');
 
 /**
@@ -89,6 +103,7 @@ export async function buildResearchPrompt(
 			.map((t) => t.name)
 			.join(', ')}.`,
 		'They only read. You cannot change a note in this step, and nothing you say here reaches the user directly.',
+		'no_research_needed is offered alongside them and ends this step without collecting anything.',
 		'Paths are always relative to the vault root — "Notes/Ideas.md", never "/home/you/Vault/Notes/Ideas.md" or "C:\\...". There is no working directory, no "~", and no leading slash.',
 	].join('\n');
 

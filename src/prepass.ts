@@ -1,7 +1,7 @@
 import { App } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
 import { ChatMessage, ToolCall } from './types';
-import { runAgent } from './agent';
+import { ExtraTool, runAgent } from './agent';
 import { buildResearchPrompt } from './prompts';
 import { isResearchTool } from './tools/vault-tools';
 import { McpManager } from './mcp/manager';
@@ -22,6 +22,13 @@ import { RagIndexer } from './rag/indexer';
  * What crosses over is quoted, not summarised: the pass runs on the same model
  * that will answer, so a digest in its own words would buy compactness at the
  * price of a paraphrase nothing downstream could catch.
+ *
+ * Most messages need none of this. A conversation is mostly follow-ups, and a
+ * pass that runs anyway is a wait before every answer, so deciding not to
+ * research is the pass's first job and its cheapest outcome: one generation
+ * that calls `no_research_needed` and stops. To make that decision it is shown
+ * the last few turns and what the previous pass collected — without them, "do
+ * we already have this?" is not a question the message alone can answer.
  */
 
 const PRE_PASS_MARKER =
@@ -29,6 +36,21 @@ const PRE_PASS_MARKER =
 
 /** Cap on the injected block, so the pre-pass can't crowd out the conversation. */
 const MAX_BLOCK_CHARS = 6000;
+
+/** Turns of conversation the pass is shown, so it can recognise a follow-up. */
+const RECENT_MESSAGES = 4;
+/** Per-message caps on that excerpt: enough to recognise, not to re-read. */
+const CLIP_USER = 600;
+const CLIP_ASSISTANT = 400;
+/** Enough of the last handover to see which notes it already covered. */
+const CLIP_HANDOVER = 1000;
+
+/**
+ * What a model with no working tool call says instead of calling
+ * `no_research_needed`. Both are accepted: small models split about evenly on
+ * which of the two they can do reliably.
+ */
+const SKIP_SENTINEL = 'NO_CONTEXT_NEEDED';
 
 /** Remove a previous turn's pre-pass block from a system prompt. */
 export function stripPrePass(systemContent: string): string {
@@ -49,6 +71,14 @@ export interface PrePassEvents {
 	onNote?: (text: string) => void;
 }
 
+/** What the pass is shown besides the message itself, to decide on skipping. */
+export interface PrePassContext {
+	/** The conversation before this message, newest last. Tool turns and all. */
+	recent?: ChatMessage[];
+	/** The block the last pass collected, which the answer still carries. */
+	previousHandover?: string;
+}
+
 /**
  * Research `userMessage` against the vault and return the context block for the
  * system prompt, or null when there is nothing worth adding. Never throws — a
@@ -61,13 +91,17 @@ export async function prepareContext(
 	mcp: McpManager,
 	rag: RagIndexer,
 	userMessage: string,
+	context: PrePassContext = {},
 	events: PrePassEvents = {},
 	signal?: AbortSignal,
 ): Promise<string | null> {
 	const history: ChatMessage[] = [
 		{ role: 'system', content: await buildResearchPrompt(app, settings) },
-		{ role: 'user', content: userMessage },
+		{ role: 'user', content: researchRequest(userMessage, context) },
 	];
+
+	/** Set by the skip tool: why the pass decided the vault wasn't needed. */
+	let skipped: string | null = null;
 
 	// Reasoning that arrives before a closing tag is classified as content, so
 	// it is held rather than dropped until the stream says which it was.
@@ -111,6 +145,11 @@ export async function prepareContext(
 				},
 			},
 			{
+				extraTools: [skipTool((reason) => (skipped = reason))],
+				// Checked before each model call, so calling the skip tool ends
+				// the pass on the generation that called it rather than paying
+				// for another one to say nothing.
+				shouldStop: () => skipped !== null,
 				toolFilter: isResearchTool,
 				maxSteps: Math.max(1, settings.prePassSteps),
 				signal,
@@ -124,6 +163,15 @@ export async function prepareContext(
 	if (signal?.aborted) return null;
 
 	const handover = finalMessage(history);
+	// A model that can't call the tool says so in words instead.
+	if (skipped === null && handover.startsWith(SKIP_SENTINEL)) {
+		skipped = handover.slice(SKIP_SENTINEL.length).replace(/^[\s:.—-]+/, '').trim();
+	}
+	if (skipped !== null) {
+		events.onNote?.(skipped ? `No new context needed — ${skipped}` : 'No new context needed.');
+		return null;
+	}
+
 	if (!handover) {
 		// Every step went on tool calls and the budget ran out before anything
 		// was written up. The loop has already said so; this is what to do
@@ -140,6 +188,88 @@ export async function prepareContext(
 			? handover.slice(0, MAX_BLOCK_CHARS) + '\n…(truncated)'
 			: handover;
 	return `${PRE_PASS_MARKER}\n${block}`;
+}
+
+/**
+ * The way out. Offered as a tool because the model is already holding tools,
+ * and a tool call is the one thing every tool-trained model can be relied on
+ * to emit; the sentinel in the prompt covers the ones that can't.
+ */
+function skipTool(onSkip: (reason: string) => void): ExtraTool {
+	return {
+		spec: {
+			name: 'no_research_needed',
+			description:
+				'End this research step without collecting anything, because the message does not need the vault: it is about the conversation itself, it is small talk or an instruction, or what it needs was already collected or already discussed. Call this instead of searching when that is so, and call nothing else.',
+			parameters: {
+				type: 'object',
+				properties: {
+					reason: {
+						type: 'string',
+						description: 'One short line: why the vault is not needed for this message.',
+					},
+				},
+				required: ['reason'],
+			},
+		},
+		run: (argsJson: string) => {
+			let reason = '';
+			try {
+				const v = (JSON.parse(argsJson || '{}') as Record<string, unknown>).reason;
+				if (typeof v === 'string') reason = v.trim();
+			} catch {
+				// A malformed argument still means the model chose to skip.
+			}
+			onSkip(reason);
+			return Promise.resolve('Nothing collected; the answer will proceed without new context.');
+		},
+	};
+}
+
+/**
+ * The message the pass researches, with what it needs to judge whether to
+ * bother: the last few turns, and what the previous pass already handed over.
+ * Both are clipped — they are here to be recognised, not re-read, and the
+ * point of the pass is to not spend context on reading.
+ */
+function researchRequest(userMessage: string, context: PrePassContext): string {
+	const parts: string[] = [];
+
+	const recent = (context.recent ?? [])
+		.filter((m) => m.role === 'user' || (m.role === 'assistant' && !m.toolCalls?.length))
+		.filter((m) => m.content.trim())
+		.slice(-RECENT_MESSAGES);
+	if (recent.length) {
+		parts.push(
+			'--- The conversation so far (you are not answering it; it is here so you can tell a follow-up from a new subject) ---',
+			recent
+				.map(
+					(m) =>
+						`${m.role === 'user' ? 'User' : 'Assistant'}: ${clip(m.content, m.role === 'user' ? CLIP_USER : CLIP_ASSISTANT)}`,
+				)
+				.join('\n'),
+		);
+	}
+
+	const previous = context.previousHandover?.trim();
+	if (previous) {
+		parts.push(
+			'--- Already handed over by the last research pass, and still in front of the assistant ---',
+			clip(previous, CLIP_HANDOVER),
+		);
+	}
+
+	parts.push('--- The new message to decide on, and research if it needs it ---', userMessage);
+	return parts.join('\n\n');
+}
+
+/** Cut to `max` characters on a word boundary where there is one nearby. */
+function clip(text: string, max: number): string {
+	const t = text.trim();
+	if (t.length <= max) return t;
+	const cut = t.slice(0, max);
+	const space = cut.lastIndexOf(' ');
+	return `${space > max - 80 ? cut.slice(0, space) : cut}…`;
 }
 
 /**

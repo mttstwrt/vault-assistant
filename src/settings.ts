@@ -550,7 +550,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Prepare context before answering')
 			.setDesc(
-				'Before each of your messages, run a read-only research pass over the vault: it searches, opens the notes it finds, and hands the answer a short brief quoting what matters. The reading happens in its own throwaway context, so the conversation gets the findings without the rounds that found them — which is what keeps a small model’s window free for the answer. Costs a few extra model calls per message.',
+				'Before a message that needs it, run a read-only research pass over the vault: it searches, opens the notes it finds, and hands the answer a short brief quoting what matters. The reading happens in its own throwaway context, so the conversation gets the findings without the rounds that found them — which is what keeps a small model’s window free for the answer. It decides whether the message needs the vault first, so a follow-up or a “make that shorter” costs one model call rather than a search.',
 			)
 			.addToggle((t) =>
 				t.setValue(s.usePrePass).onChange(async (v) => {
