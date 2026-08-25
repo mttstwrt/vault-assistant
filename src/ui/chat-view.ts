@@ -718,11 +718,18 @@ export class ChatView extends ItemView {
 				const block = await prepareContext(
 					this.app,
 					this.plugin.settings,
+					() => this.plugin.saveSettings(),
+					this.plugin.mcp,
 					this.plugin.rag,
 					text,
 					{
+						// Each round is a separate generation; run them together
+						// and the reasoning reads as one long sentence.
+						onStep: () => section.pushStepBreak(),
 						onReasoning: (delta) => section.push(delta),
-						onQueries: (queries) => section.addNote(`Searched for ${queries.join(' · ')}`),
+						onToolCall: (call) => this.addToolCall(call),
+						onToolResult: (call, result) => this.addToolResult(call, result),
+						onNote: (note) => section.addNote(note),
 					},
 					abort.signal,
 				);

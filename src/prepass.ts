@@ -1,25 +1,31 @@
 import { App } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
-import { ChatMessage } from './types';
-import { chatCompletion } from './api/client';
-import { StreamHandlers, streamChatCompletion } from './api/stream';
+import { ChatMessage, ToolCall } from './types';
+import { runAgent } from './agent';
+import { buildResearchPrompt } from './prompts';
+import { isResearchTool } from './tools/vault-tools';
+import { McpManager } from './mcp/manager';
 import { RagIndexer } from './rag/indexer';
-import { isReadable } from './permissions';
 
 /**
- * Context pre-pass: before answering, expand the user's message into a few
- * search queries with a cheap model call, run them against the vault, and
- * inject the top hits into the system prompt. Aimed at small local models,
- * which flail on tool selection — pre-fetched grounding cuts tool rounds.
+ * Context pre-pass: a research pass over the vault, run before the answer
+ * starts, whose findings are injected into the answering thread's system
+ * prompt.
  *
- * The call runs on the chat model, so on a reasoning model it thinks first,
- * and that is dead air the user is left staring at. `PrePassEvents` reports it
- * as it happens: the reasoning while it streams, then the queries it settled
- * on, which are what the step is actually for.
+ * It is the same agent loop the conversation uses, scoped three ways: a short
+ * history of its own, an allow-list of tools that only read, and a step budget.
+ * The short history is the point. Discovery is what fills a small model's
+ * context — listing folders, opening the wrong note, reading three pages to use
+ * two lines — and all of it stays in the conversation for good. Here it happens
+ * in a history that is thrown away, and only the handover crosses over.
+ *
+ * What crosses over is quoted, not summarised: the pass runs on the same model
+ * that will answer, so a digest in its own words would buy compactness at the
+ * price of a paraphrase nothing downstream could catch.
  */
 
 const PRE_PASS_MARKER =
-	'\n\n--- Pre-fetched context (from a preliminary vault search; may be irrelevant — verify with tools before relying on it) ---';
+	'\n\n--- Pre-fetched context (a research pass over the vault ran before this message; the paths are notes it opened and the quotes are theirs, but it may have missed something or judged wrongly — verify with tools before relying on it) ---';
 
 /** Cap on the injected block, so the pre-pass can't crowd out the conversation. */
 const MAX_BLOCK_CHARS = 6000;
@@ -32,134 +38,140 @@ export function stripPrePass(systemContent: string): string {
 
 /** What the pre-pass reports while it runs, so the panel can show its work. */
 export interface PrePassEvents {
+	/** A new model call is starting; anything shown so far was a previous one. */
+	onStep?: () => void;
 	/** The model's reasoning, as it arrives, when it exposes any. */
 	onReasoning?: (delta: string) => void;
-	/** The searches it settled on, once they parse. */
-	onQueries?: (queries: string[]) => void;
+	/** A note it is opening, or a search it is running. */
+	onToolCall?: (call: ToolCall) => void;
+	onToolResult?: (call: ToolCall, result: string) => void;
+	/** What it handed over, or why it stopped without handing anything over. */
+	onNote?: (text: string) => void;
 }
 
 /**
- * Build the pre-pass context block for `userMessage`, or null when nothing
- * useful was found. Never throws — a failed pre-pass degrades to a normal turn.
+ * Research `userMessage` against the vault and return the context block for the
+ * system prompt, or null when there is nothing worth adding. Never throws — a
+ * failed pre-pass degrades to a normal turn.
  */
 export async function prepareContext(
 	app: App,
 	settings: VaultAssistantSettings,
+	saveSettings: () => Promise<void>,
+	mcp: McpManager,
 	rag: RagIndexer,
 	userMessage: string,
 	events: PrePassEvents = {},
 	signal?: AbortSignal,
 ): Promise<string | null> {
-	let queries: string[];
+	const history: ChatMessage[] = [
+		{ role: 'system', content: await buildResearchPrompt(app, settings) },
+		{ role: 'user', content: userMessage },
+	];
+
+	// Reasoning that arrives before a closing tag is classified as content, so
+	// it is held rather than dropped until the stream says which it was.
+	let held = '';
+
 	try {
-		queries = await extractQueries(settings, userMessage, events, signal);
+		await runAgent(
+			app,
+			settings,
+			saveSettings,
+			mcp,
+			rag,
+			new Set(), // a research pass never writes, so it holds no approvals
+			new Set(),
+			history,
+			{
+				// The handover is read off the history once the loop ends, so
+				// there is nothing to do with a turn as it completes.
+				onAssistant: () => undefined,
+				onToolCall: (call) => events.onToolCall?.(call),
+				onToolResult: (call, result) => events.onToolResult?.(call, result),
+				onError: (message) => events.onNote?.(message),
+				// Nothing that writes is offered, so nothing should ask. If
+				// something finds a way to, the pre-pass is the wrong moment to
+				// interrupt someone who is waiting for an answer.
+				requestApproval: () => Promise.resolve('deny' as const),
+				stream: {
+					onStart: () => {
+						held = '';
+						events.onStep?.();
+					},
+					onContent: (delta) => {
+						held += delta;
+					},
+					onReasoning: (delta) => events.onReasoning?.(delta),
+					onReclassify: () => {
+						events.onReasoning?.(held);
+						held = '';
+					},
+					onDone: () => undefined,
+				},
+			},
+			{
+				toolFilter: isResearchTool,
+				maxSteps: Math.max(1, settings.prePassSteps),
+				signal,
+			},
+		);
 	} catch (e) {
-		console.warn('[vault-assistant] pre-pass query extraction failed:', e);
+		console.warn('[vault-assistant] pre-pass failed:', e);
 		return null;
 	}
-	if (queries.length === 0) return null;
-	events.onQueries?.(queries.slice(0, 4));
+
 	if (signal?.aborted) return null;
 
-	const sections: string[] = [];
-	for (const q of queries.slice(0, 4)) {
-		let hits = '';
-		if (settings.useRag) {
-			try {
-				hits = await rag.search(q, Math.min(settings.ragTopK, 4));
-			} catch (e) {
-				console.warn('[vault-assistant] pre-pass semantic search failed:', e);
-			}
-			// Index problems come back as prose, not hits — fall through to literal.
-			if (!hits.includes(': …')) hits = '';
-		}
-		if (!hits) hits = await literalSearch(app, settings, q, 4);
-		if (hits) sections.push(`Search "${q}":\n${hits}`);
+	const handover = finalMessage(history);
+	if (!handover) {
+		// Every step went on tool calls and the budget ran out before anything
+		// was written up. The loop has already said so; this is what to do
+		// about it, since the budget is a setting.
+		events.onNote?.(
+			`No context was collected. Raise “Research steps” (currently ${settings.prePassSteps}) if the pass keeps running out.`,
+		);
+		return null;
 	}
-	if (sections.length === 0) return null;
 
-	let block = sections.join('\n\n');
-	if (block.length > MAX_BLOCK_CHARS) block = block.slice(0, MAX_BLOCK_CHARS) + '\n…(truncated)';
+	events.onNote?.(handoverNote(handover));
+	const block =
+		handover.length > MAX_BLOCK_CHARS
+			? handover.slice(0, MAX_BLOCK_CHARS) + '\n…(truncated)'
+			: handover;
 	return `${PRE_PASS_MARKER}\n${block}`;
 }
 
-/** One cheap, tool-less model call: user message → 2–4 short search queries. */
-async function extractQueries(
-	settings: VaultAssistantSettings,
-	userMessage: string,
-	events: PrePassEvents,
-	signal?: AbortSignal,
-): Promise<string[]> {
-	const messages: ChatMessage[] = [
-		{
-			role: 'system',
-			content:
-				'You turn a user request into search queries over their personal Obsidian vault. ' +
-				'Reply with ONLY a JSON array of 2 to 4 short search queries (plain strings) that would ' +
-				'surface notes relevant to the request. Use the user\'s own likely wording, not questions. ' +
-				'No commentary, no code fences.',
-		},
-		{ role: 'user', content: userMessage },
-	];
-	const overrides = { temperature: 0.1 };
-
-	// Streamed only to show the reasoning as it happens; the answer is read off
-	// the result either way, so a stream that fails costs nothing but the show.
-	const result = settings.streamResponses
-		? await streamChatCompletion(settings, messages, [], overrides, streamToEvents(events), signal)
-		: await chatCompletion(settings, messages, [], overrides);
-	if (!settings.streamResponses && result.reasoning) events.onReasoning?.(result.reasoning);
-
-	const text = result.content;
-	const start = text.indexOf('[');
-	const end = text.lastIndexOf(']');
-	if (start === -1 || end <= start) return [];
-	const parsed: unknown = JSON.parse(text.slice(start, end + 1));
-	if (!Array.isArray(parsed)) return [];
-	return parsed.filter((q): q is string => typeof q === 'string' && q.trim().length > 0);
+/**
+ * The pass's handover: the last thing it said without also calling a tool.
+ * Anything earlier was said on the way to a tool call, not as a conclusion.
+ */
+function finalMessage(history: ChatMessage[]): string {
+	for (let i = history.length - 1; i >= 0; i--) {
+		const m = history[i];
+		if (m?.role === 'assistant' && !m.toolCalls?.length && m.content.trim()) {
+			return m.content.trim();
+		}
+	}
+	return '';
 }
 
 /**
- * Forward a stream's reasoning to the caller. Content is held rather than
- * dropped: a model that reasons from its first token has it classified as
- * content until the closing tag arrives, and reclassifying is how that is
- * put right (see ThinkTagSplitter).
+ * Name what crossed over, so it can be seen without opening the prompt. The
+ * paths are read a line at a time, the way the handover is asked to write them
+ * — a pattern loose in the text would stop at the first space, and half a vault
+ * has spaces in its filenames.
  */
-function streamToEvents(events: PrePassEvents): StreamHandlers {
-	let held = '';
-	return {
-		onContent: (delta) => {
-			held += delta;
-		},
-		onReasoning: (delta) => events.onReasoning?.(delta),
-		onReclassify: () => {
-			events.onReasoning?.(held);
-			held = '';
-		},
-	};
-}
-
-/** Case-insensitive substring scan, same shape as the `search` tool's results. */
-async function literalSearch(
-	app: App,
-	settings: VaultAssistantSettings,
-	query: string,
-	limit: number,
-): Promise<string> {
-	const q = query.toLowerCase();
-	const results: string[] = [];
-	for (const file of app.vault.getMarkdownFiles()) {
-		if (!isReadable(file.path, settings)) continue;
-		const text = await app.vault.cachedRead(file);
-		const idx = text.toLowerCase().indexOf(q);
-		if (idx >= 0) {
-			const snippet = text
-				.slice(Math.max(0, idx - 40), idx + 80)
-				.replace(/\s+/g, ' ')
-				.trim();
-			results.push(`${file.path}: …${snippet}…`);
-			if (results.length >= limit) break;
-		}
-	}
-	return results.join('\n');
+function handoverNote(handover: string): string {
+	const paths = [
+		...new Set(
+			handover
+				.split('\n')
+				.map((line) => line.replace(/^[-*•\s]+/, '').replace(/:\s*$/, '').trim())
+				.filter((line) => /\.md$/i.test(line) && line.length < 200),
+		),
+	];
+	const size = `${handover.length} characters`;
+	if (!paths.length) return `Handed over ${size}`;
+	return `Handed over ${size} from ${paths.length} note${paths.length === 1 ? '' : 's'}: ${paths.join(' · ')}`;
 }

@@ -86,6 +86,8 @@ export interface VaultAssistantSettings {
 	systemPrompt: string;
 	/** Run a cheap query-expansion + vault-search pass before each new message. */
 	usePrePass: boolean;
+	/** Tool-call rounds the pre-pass may take before it must hand over. */
+	prePassSteps: number;
 	/**
 	 * Tell the agent which notes are open and which one is focused (and expose
 	 * the open_files tool), so "this note" resolves without naming a file.
@@ -214,6 +216,7 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	repetitionPenalty: 1,
 	systemPrompt: DEFAULT_SYSTEM_PROMPT,
 	usePrePass: false,
+	prePassSteps: 6,
 	useOpenFiles: true,
 	readBlockPaths: [],
 	writePaths: [],
@@ -547,14 +550,33 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Prepare context before answering')
 			.setDesc(
-				'Before each of your messages, make one cheap model call to turn it into a few search queries, run them against the vault (semantic search when enabled, literal otherwise), and inject the top hits into the system prompt. Helps small local models ground their answers with fewer tool rounds, at the cost of one extra round-trip.',
+				'Before each of your messages, run a read-only research pass over the vault: it searches, opens the notes it finds, and hands the answer a short brief quoting what matters. The reading happens in its own throwaway context, so the conversation gets the findings without the rounds that found them — which is what keeps a small model’s window free for the answer. Costs a few extra model calls per message.',
 			)
 			.addToggle((t) =>
 				t.setValue(s.usePrePass).onChange(async (v) => {
 					s.usePrePass = v;
 					await this.save();
+					this.display();
 				}),
 			);
+
+		if (s.usePrePass) {
+			new Setting(containerEl)
+				.setName('Research steps')
+				.setDesc(
+					'How many tool-call rounds the research pass may take before it has to write up. Each one is a full generation, so this is the trade between how thoroughly it looks and how long you wait. 6 is enough to search, read two or three notes and hand over.',
+				)
+				.addSlider((sl) =>
+					sl
+						.setLimits(1, 20, 1)
+						.setValue(s.prePassSteps)
+						.setDynamicTooltip()
+						.onChange(async (v) => {
+							s.prePassSteps = v;
+							await this.save();
+						}),
+				);
+		}
 
 		new Setting(containerEl)
 			.setName('Send extra request parameters')

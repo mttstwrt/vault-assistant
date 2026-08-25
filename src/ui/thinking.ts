@@ -71,6 +71,15 @@ export class ThinkingSection {
 		this.opts.onGrow();
 	}
 
+	/**
+	 * Separate what follows from what came before — a second model call, whose
+	 * reasoning is a new train of thought rather than a continuation. Nothing
+	 * yet shown means nothing to separate from.
+	 */
+	pushStepBreak(): void {
+		if (this.textNode.data.trim()) this.push('\n\n');
+	}
+
 	/** Replace everything shown so far (reasoning arrived out of order). */
 	setText(text: string): void {
 		this.textNode.data = text;

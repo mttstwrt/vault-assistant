@@ -200,6 +200,35 @@ export function activeToolSpecs(settings: VaultAssistantSettings): ToolSpec[] {
 	return off.size ? TOOL_SPECS.filter((t) => !off.has(t.name)) : TOOL_SPECS;
 }
 
+/**
+ * What the context pre-pass may use: everything that only looks. An allow-list
+ * rather than a list of writers to exclude, so a tool added later is refused
+ * until someone decides otherwise — the safe direction to be wrong in. MCP
+ * tools are excluded by not being named: another server's tools are arbitrary,
+ * may write, and may stop to ask.
+ */
+const RESEARCH_TOOLS = new Set([
+	'list_files',
+	'read_file',
+	'search',
+	'semantic_search',
+	'wiki_home',
+	'wiki_page',
+	'list_wiki',
+	'links',
+	'open_files',
+]);
+
+/** Whether the pre-pass may call `name` (its `toolFilter`). */
+export function isResearchTool(name: string): boolean {
+	return RESEARCH_TOOLS.has(name);
+}
+
+/** The tools the pre-pass is actually offered, for the prompt that lists them. */
+export function researchToolSpecs(settings: VaultAssistantSettings): ToolSpec[] {
+	return activeToolSpecs(settings).filter((t) => isResearchTool(t.name));
+}
+
 /** Create a folder and any missing parents. */
 async function ensureFolder(app: App, folder: string): Promise<void> {
 	const parts = normalizePath(folder).split('/').filter(Boolean);
