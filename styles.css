@@ -167,6 +167,14 @@
 	overflow: auto;
 }
 
+/* What a step settled on, under the reasoning that got it there. */
+.va-think-note {
+	margin: 6px 0 2px;
+	padding: 0 8px;
+	color: var(--text-muted);
+	font-size: var(--font-smallest);
+}
+
 .va-content {
 	border-radius: 8px;
 	padding: 8px 10px;

@@ -3,9 +3,10 @@
  * model's reasoning goes into a collapsible "thinking" section that ticks while
  * it works, and the finished answer is re-rendered as markdown.
  */
-import { App, Component, MarkdownRenderer, setIcon } from 'obsidian';
+import { App, Component, MarkdownRenderer } from 'obsidian';
 import { CallStats } from '../api/client';
 import { addCopyButton } from './message-render';
+import { ThinkingSection } from './thinking';
 
 export interface TurnOptions {
 	/** Keep the thinking section open while the model reasons. */
@@ -14,24 +15,11 @@ export interface TurnOptions {
 	onGrow: () => void;
 }
 
-/** The live thinking section, created the first time reasoning arrives. */
-interface ThinkBlock {
-	details: HTMLDetailsElement;
-	label: HTMLElement;
-	text: Text;
-	startedAt: number;
-	/** 0 while the model is still reasoning. */
-	endedAt: number;
-	/** Once the user opens or closes it themselves, we stop doing it for them. */
-	userToggled: boolean;
-}
-
 export class AssistantTurn {
 	private bubble: HTMLElement | null = null;
 	private contentEl: HTMLElement | null = null;
 	private contentText: Text | null = null;
-	private think: ThinkBlock | null = null;
-	private ticker: number | null = null;
+	private think: ThinkingSection | null = null;
 	private content = '';
 	private reasoning = '';
 
@@ -44,7 +32,7 @@ export class AssistantTurn {
 
 	/** Answer text; appended to a single text node so selections survive. */
 	pushContent(delta: string): void {
-		this.closeThinking();
+		this.think?.close();
 		// Reasoning models leave blank lines behind their closing tag.
 		const text = this.content ? delta : delta.replace(/^\s+/, '');
 		if (!text) return;
@@ -55,16 +43,7 @@ export class AssistantTurn {
 
 	pushReasoning(delta: string): void {
 		this.reasoning += delta;
-		const think = this.ensureThink();
-		// A model that reasons again after answering restarts the clock.
-		if (think.endedAt) {
-			think.endedAt = 0;
-			think.startedAt = Date.now();
-			this.startTicker();
-		}
-		think.text.appendData(delta);
-		this.updateThinkLabel();
-		this.opts.onGrow();
+		this.ensureThink().push(delta);
 	}
 
 	/**
@@ -78,15 +57,12 @@ export class AssistantTurn {
 		this.content = '';
 		if (this.contentText) this.contentText.data = '';
 		this.reasoning = prior + this.reasoning;
-		const think = this.ensureThink();
-		think.text.data = this.reasoning;
-		this.updateThinkLabel();
+		this.ensureThink().setText(this.reasoning);
 	}
 
 	/** Close the turn: render the answer as markdown and report how it went. */
 	async finish(info: { stats?: CallStats; aborted: boolean }): Promise<void> {
-		this.stopTicker();
-		this.closeThinking();
+		this.think?.close();
 
 		if (!this.content.trim() && !this.reasoning.trim()) {
 			// A tool-only turn has nothing to show.
@@ -118,7 +94,7 @@ export class AssistantTurn {
 
 	/** Stop the elapsed-time ticker (the view is closing mid-stream). */
 	dispose(): void {
-		this.stopTicker();
+		this.think?.dispose();
 	}
 
 	private statusLine(info: { stats?: CallStats; aborted: boolean }): string {
@@ -152,66 +128,18 @@ export class AssistantTurn {
 		return this.contentText;
 	}
 
-	private ensureThink(): ThinkBlock {
+	private ensureThink(): ThinkingSection {
 		if (this.think) return this.think;
 		const bubble = this.ensureBubble();
-		const details = bubble.createEl('details', { cls: 'va-think' });
-		// The thinking section belongs above the answer it produced.
-		if (this.contentEl) bubble.insertBefore(details, this.contentEl);
-		details.open = this.opts.expandThinking;
-
-		const summary = details.createEl('summary');
-		setIcon(summary.createSpan({ cls: 'va-think-icon' }), 'brain');
-		const label = summary.createSpan({ cls: 'va-think-label', text: 'Thinking…' });
-
-		const body = details.createDiv({ cls: 'va-think-body' });
-		const text = body.doc.createTextNode('');
-		body.appendChild(text);
-
-		this.think = {
-			details,
-			label,
-			text,
-			startedAt: Date.now(),
-			endedAt: 0,
-			userToggled: false,
-		};
-		// Clicking (or keying) the summary is the only signal of user intent we
-		// can trust: setting `open` in code fires `toggle` too.
-		summary.addEventListener('click', () => {
-			if (this.think) this.think.userToggled = true;
+		this.think = new ThinkingSection(bubble, {
+			expanded: this.opts.expandThinking,
+			icon: 'brain',
+			busyLabel: 'Thinking…',
+			doneLabel: 'Thought for',
+			onGrow: this.opts.onGrow,
 		});
-		this.startTicker();
+		// The thinking section belongs above the answer it produced.
+		if (this.contentEl) bubble.insertBefore(this.think.el, this.contentEl);
 		return this.think;
-	}
-
-	/** Mark reasoning as finished: freeze the clock and fold the section away. */
-	private closeThinking(): void {
-		const think = this.think;
-		if (!think || think.endedAt) return;
-		think.endedAt = Date.now();
-		this.stopTicker();
-		this.updateThinkLabel();
-		if (!think.userToggled) think.details.open = false;
-	}
-
-	private updateThinkLabel(): void {
-		const think = this.think;
-		if (!think) return;
-		const seconds = ((think.endedAt || Date.now()) - think.startedAt) / 1000;
-		think.label.setText(
-			think.endedAt ? `Thought for ${seconds.toFixed(1)}s` : `Thinking… ${seconds.toFixed(1)}s`,
-		);
-	}
-
-	private startTicker(): void {
-		if (this.ticker !== null) return;
-		this.ticker = this.parent.win.setInterval(() => this.updateThinkLabel(), 200);
-	}
-
-	private stopTicker(): void {
-		if (this.ticker === null) return;
-		this.parent.win.clearInterval(this.ticker);
-		this.ticker = null;
 	}
 }

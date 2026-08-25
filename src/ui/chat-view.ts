@@ -36,6 +36,7 @@ import { prepareContext, stripPrePass } from '../prepass';
 import { suggestConversationTitle } from '../title';
 import { buildOpenFilesBlock, stripOpenFiles } from '../tools/workspace';
 import { AssistantTurn } from './assistant-turn';
+import { ThinkingSection } from './thinking';
 import { fitToContent } from './autogrow';
 import {
 	addAssistantBubble,
@@ -84,6 +85,8 @@ export class ChatView extends ItemView {
 	private abort: AbortController | null = null;
 	/** The turn currently streaming in, if any. */
 	private turn: AssistantTurn | null = null;
+	/** The pre-pass's own thinking section, while one is running. */
+	private prepass: ThinkingSection | null = null;
 	/** False once the user scrolls up, so streaming output stops yanking the view. */
 	private followOutput = true;
 	/** True once onOpen has built the panel, so setState knows whether to wait. */
@@ -267,6 +270,8 @@ export class ChatView extends ItemView {
 		this.abort = null;
 		this.turn?.dispose();
 		this.turn = null;
+		this.prepass?.dispose();
+		this.prepass = null;
 		this.workflowRun?.stop();
 		this.cancelPendingApprovals();
 		this.toolEls.clear();
@@ -699,7 +704,33 @@ export class ChatView extends ItemView {
 			content += buildOpenFilesBlock(this.app, this.plugin.settings);
 			if (this.plugin.settings.usePrePass && !abort.signal.aborted) {
 				this.setStatus('Preparing context…');
-				const block = await prepareContext(this.app, this.plugin.settings, this.plugin.rag, text);
+				// The pre-pass runs on the chat model, so on a reasoning model
+				// this is where the wait is. Show its work while it happens.
+				const section = new ThinkingSection(this.messagesEl, {
+					expanded: this.plugin.settings.expandThinking,
+					icon: 'search',
+					busyLabel: 'Preparing context…',
+					doneLabel: 'Prepared context in',
+					onGrow: () => this.scrollToBottom(),
+				});
+				this.prepass = section;
+				this.scrollToBottom(true);
+				const block = await prepareContext(
+					this.app,
+					this.plugin.settings,
+					this.plugin.rag,
+					text,
+					{
+						onReasoning: (delta) => section.push(delta),
+						onQueries: (queries) => section.addNote(`Searched for ${queries.join(' · ')}`),
+					},
+					abort.signal,
+				);
+				section.close();
+				// A model that shows no reasoning and a pre-pass that found no
+				// queries leave an empty section behind; take it back out.
+				if (section.isEmpty()) section.remove();
+				this.prepass = null;
 				if (block) content += block;
 				this.setStatus('Thinking…');
 			}

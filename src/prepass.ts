@@ -1,6 +1,8 @@
 import { App } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
+import { ChatMessage } from './types';
 import { chatCompletion } from './api/client';
+import { StreamHandlers, streamChatCompletion } from './api/stream';
 import { RagIndexer } from './rag/indexer';
 import { isReadable } from './permissions';
 
@@ -9,6 +11,11 @@ import { isReadable } from './permissions';
  * search queries with a cheap model call, run them against the vault, and
  * inject the top hits into the system prompt. Aimed at small local models,
  * which flail on tool selection — pre-fetched grounding cuts tool rounds.
+ *
+ * The call runs on the chat model, so on a reasoning model it thinks first,
+ * and that is dead air the user is left staring at. `PrePassEvents` reports it
+ * as it happens: the reasoning while it streams, then the queries it settled
+ * on, which are what the step is actually for.
  */
 
 const PRE_PASS_MARKER =
@@ -23,6 +30,14 @@ export function stripPrePass(systemContent: string): string {
 	return i === -1 ? systemContent : systemContent.slice(0, i);
 }
 
+/** What the pre-pass reports while it runs, so the panel can show its work. */
+export interface PrePassEvents {
+	/** The model's reasoning, as it arrives, when it exposes any. */
+	onReasoning?: (delta: string) => void;
+	/** The searches it settled on, once they parse. */
+	onQueries?: (queries: string[]) => void;
+}
+
 /**
  * Build the pre-pass context block for `userMessage`, or null when nothing
  * useful was found. Never throws — a failed pre-pass degrades to a normal turn.
@@ -32,15 +47,19 @@ export async function prepareContext(
 	settings: VaultAssistantSettings,
 	rag: RagIndexer,
 	userMessage: string,
+	events: PrePassEvents = {},
+	signal?: AbortSignal,
 ): Promise<string | null> {
 	let queries: string[];
 	try {
-		queries = await extractQueries(settings, userMessage);
+		queries = await extractQueries(settings, userMessage, events, signal);
 	} catch (e) {
 		console.warn('[vault-assistant] pre-pass query extraction failed:', e);
 		return null;
 	}
 	if (queries.length === 0) return null;
+	events.onQueries?.(queries.slice(0, 4));
+	if (signal?.aborted) return null;
 
 	const sections: string[] = [];
 	for (const q of queries.slice(0, 4)) {
@@ -68,23 +87,28 @@ export async function prepareContext(
 async function extractQueries(
 	settings: VaultAssistantSettings,
 	userMessage: string,
+	events: PrePassEvents,
+	signal?: AbortSignal,
 ): Promise<string[]> {
-	const result = await chatCompletion(
-		settings,
-		[
-			{
-				role: 'system',
-				content:
-					'You turn a user request into search queries over their personal Obsidian vault. ' +
-					'Reply with ONLY a JSON array of 2 to 4 short search queries (plain strings) that would ' +
-					'surface notes relevant to the request. Use the user\'s own likely wording, not questions. ' +
-					'No commentary, no code fences.',
-			},
-			{ role: 'user', content: userMessage },
-		],
-		[],
-		{ temperature: 0.1 },
-	);
+	const messages: ChatMessage[] = [
+		{
+			role: 'system',
+			content:
+				'You turn a user request into search queries over their personal Obsidian vault. ' +
+				'Reply with ONLY a JSON array of 2 to 4 short search queries (plain strings) that would ' +
+				'surface notes relevant to the request. Use the user\'s own likely wording, not questions. ' +
+				'No commentary, no code fences.',
+		},
+		{ role: 'user', content: userMessage },
+	];
+	const overrides = { temperature: 0.1 };
+
+	// Streamed only to show the reasoning as it happens; the answer is read off
+	// the result either way, so a stream that fails costs nothing but the show.
+	const result = settings.streamResponses
+		? await streamChatCompletion(settings, messages, [], overrides, streamToEvents(events), signal)
+		: await chatCompletion(settings, messages, [], overrides);
+	if (!settings.streamResponses && result.reasoning) events.onReasoning?.(result.reasoning);
 
 	const text = result.content;
 	const start = text.indexOf('[');
@@ -93,6 +117,26 @@ async function extractQueries(
 	const parsed: unknown = JSON.parse(text.slice(start, end + 1));
 	if (!Array.isArray(parsed)) return [];
 	return parsed.filter((q): q is string => typeof q === 'string' && q.trim().length > 0);
+}
+
+/**
+ * Forward a stream's reasoning to the caller. Content is held rather than
+ * dropped: a model that reasons from its first token has it classified as
+ * content until the closing tag arrives, and reclassifying is how that is
+ * put right (see ThinkTagSplitter).
+ */
+function streamToEvents(events: PrePassEvents): StreamHandlers {
+	let held = '';
+	return {
+		onContent: (delta) => {
+			held += delta;
+		},
+		onReasoning: (delta) => events.onReasoning?.(delta),
+		onReclassify: () => {
+			events.onReasoning?.(held);
+			held = '';
+		},
+	};
 }
 
 /** Case-insensitive substring scan, same shape as the `search` tool's results. */
