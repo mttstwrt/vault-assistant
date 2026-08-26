@@ -222,7 +222,7 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	writePaths: [],
 	conversationsFolder: 'AI/Conversations',
 	wikiFolder: 'AI/Wiki',
-	autoSaveConversations: true,
+	autoSaveConversations: false,
 	nameConversations: true,
 	useMemory: true,
 	memoryFile: 'AI/Memory.md',
@@ -677,28 +677,27 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Auto-save conversations')
-			.setDesc('Save each conversation to the conversations folder as you chat.')
+			.setDesc(
+				'Off by default: a conversation stays in the panel until you press Save in the chat header, and from then on its file keeps up on its own. Turn this on to give every conversation a file from its first message, without being asked.',
+			)
 			.addToggle((t) =>
 				t.setValue(s.autoSaveConversations).onChange(async (v) => {
 					s.autoSaveConversations = v;
 					await this.save();
-					this.display();
 				}),
 			);
 
-		if (s.autoSaveConversations) {
-			new Setting(containerEl)
-				.setName('Let the model name conversations')
-				.setDesc(
-					'After the first exchange, make one cheap model call to title the conversation, and save it as "2026-08-12 1432 Reworking the RAG chunker". Turn this off to name files after your first message instead, with no extra call.',
-				)
-				.addToggle((t) =>
-					t.setValue(s.nameConversations).onChange(async (v) => {
-						s.nameConversations = v;
-						await this.save();
-					}),
-				);
-		}
+		new Setting(containerEl)
+			.setName('Let the model name conversations')
+			.setDesc(
+				'When a conversation is first saved, make one cheap model call to title it, and name the file "2026-08-12 1432 Reworking the RAG chunker". Turn this off to name files after your first message instead, with no extra call.',
+			)
+			.addToggle((t) =>
+				t.setValue(s.nameConversations).onChange(async (v) => {
+					s.nameConversations = v;
+					await this.save();
+				}),
+			);
 
 		new Setting(containerEl)
 			.setName('See what you have open')

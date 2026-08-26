@@ -619,3 +619,20 @@
 	font-size: var(--font-smallest);
 	font-style: italic;
 }
+
+/* A modal's row of choices, most-likely first. */
+.va-modal-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 16px;
+}
+
+/* An icon button with nothing to do says so by fading. */
+.va-new:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+.va-new:disabled:hover {
+	color: var(--text-muted);
+}

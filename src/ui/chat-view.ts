@@ -28,7 +28,7 @@ import {
 	parseConversation,
 	saveConversation,
 } from '../conversation';
-import { ConversationPicker } from './conversation-modal';
+import { ConversationPicker, askUnsavedChat } from './conversation-modal';
 import { ImportModal } from './import-modal';
 import { WorkflowModal, WorkflowStart } from './workflow-modal';
 import { WorkflowRun, createRunNote } from '../workflows/runner';
@@ -72,6 +72,7 @@ export class ChatView extends ItemView {
 	private modelEl!: HTMLSelectElement;
 	private effortEl!: HTMLSelectElement;
 	private sendBtn!: HTMLButtonElement;
+	private saveBtn!: HTMLButtonElement;
 	private toolEls = new Map<string, HTMLElement>();
 	/** Write paths the user approved for the rest of this conversation. */
 	private sessionWrites = new Set<string>();
@@ -140,6 +141,16 @@ export class ChatView extends ItemView {
 				void this.openConversation(f),
 			).open();
 
+		// Conversations are not written to the vault unless asked for, so this is
+		// how one becomes a note. After the first press the file keeps up with
+		// the panel on its own, and the button has nothing left to do.
+		this.saveBtn = header.createEl('button', {
+			cls: 'va-new',
+			attr: { 'aria-label': 'Save this conversation' },
+		});
+		setIcon(this.saveBtn, 'save');
+		this.saveBtn.onclick = () => void this.saveFromButton();
+
 		const importBtn = header.createEl('button', {
 			cls: 'va-new',
 			attr: { 'aria-label': 'Import conversations' },
@@ -155,7 +166,7 @@ export class ChatView extends ItemView {
 				attr: { 'aria-label': 'Move chat to a new window' },
 			});
 			setIcon(popBtn, 'picture-in-picture-2');
-			popBtn.onclick = () => this.popOut();
+			popBtn.onclick = () => void this.popOut();
 		}
 
 		const workflowBtn = header.createEl('button', {
@@ -399,15 +410,23 @@ export class ChatView extends ItemView {
 	 * the conversation travels as view state (see getState/setState) and is read
 	 * back from its saved transcript.
 	 */
-	private popOut(): void {
+	private async popOut(): Promise<void> {
 		if (this.busy) {
 			this.busyNotice();
 			return;
 		}
-		// The transcript is what travels, so without one the new window starts
-		// a fresh conversation. Say so rather than silently dropping it.
-		if (!this.plugin.settings.autoSaveConversations && this.history.length > 1) {
-			new Notice('Auto-save is off, so this conversation cannot follow the panel to a new window.');
+		// The saved transcript is what travels: only its path crosses to the new
+		// window. An unsaved conversation would simply not arrive, so ask rather
+		// than move it and let the user find out.
+		if (this.hasUnsavedMessages()) {
+			const choice = await askUnsavedChat(this.app, {
+				title: 'Save before moving to a new window?',
+				body: 'Only a saved conversation can follow the panel — the new window reads it back from the vault. Moving now starts a fresh conversation there and leaves this one behind.',
+				saveLabel: 'Save and move',
+				discardLabel: 'Move anyway',
+			});
+			if (choice === 'cancel') return;
+			if (choice === 'save' && !(await this.saveNow())) return;
 		}
 		try {
 			this.app.workspace.moveLeafToPopout(this.leaf);
@@ -483,6 +502,7 @@ export class ChatView extends ItemView {
 			this.busyNotice();
 			return;
 		}
+		if (!(await this.confirmDiscard())) return;
 		this.cancelPendingApprovals();
 		const systemPrompt = await buildSystemPrompt(this.app, this.plugin.settings);
 		this.history = [{ role: 'system', content: systemPrompt }];
@@ -493,6 +513,7 @@ export class ChatView extends ItemView {
 		this.sessionMcp.clear();
 		// Collected notes belong to the conversation that collected them.
 		this.prePassBlock = null;
+		this.updateSaveButton();
 		this.messagesEl.empty();
 		this.followOutput = true;
 		addInfo(
@@ -507,6 +528,7 @@ export class ChatView extends ItemView {
 			this.busyNotice();
 			return;
 		}
+		if (!(await this.confirmDiscard())) return;
 		this.cancelPendingApprovals();
 		const systemPrompt = await buildSystemPrompt(this.app, this.plugin.settings);
 		const messages = parseConversation(await this.app.vault.cachedRead(file));
@@ -518,6 +540,7 @@ export class ChatView extends ItemView {
 		this.sessionMcp.clear();
 		// Collected notes belong to the conversation that collected them.
 		this.prePassBlock = null;
+		this.updateSaveButton();
 		this.messagesEl.empty();
 		this.followOutput = true;
 		addInfo(this.messagesEl, `Continuing "${file.basename}".`);
@@ -809,8 +832,11 @@ export class ChatView extends ItemView {
 
 		if (abort.signal.aborted && !stopShown) addInfo(this.messagesEl, 'Stopped.');
 
-		// Name the file once, from the opening exchange — the answer says what
-		// the conversation turned out to be about better than the question does.
+		// Auto-save decides only whether a conversation gets a file without being
+		// asked; once it has one, saving is no longer a decision. Named here,
+		// while the panel is still busy, because naming may cost a model call —
+		// and from the opening exchange, since the answer says what the
+		// conversation turned out to be about better than the question does.
 		if (this.plugin.settings.autoSaveConversations && !this.conversationPath) {
 			this.conversationPath = await this.newConversationPath(text, abort.signal.aborted);
 		}
@@ -819,29 +845,104 @@ export class ChatView extends ItemView {
 		this.setStatus(null);
 		this.setBusy(false);
 
-		if (this.plugin.settings.autoSaveConversations && this.conversationPath) {
-			try {
-				if (this.persistedCount > 0) {
-					// Reopened conversation: append only the new turns, so the
-					// original file is preserved as saved.
-					await appendConversation(
-						this.app,
-						this.conversationPath,
-						this.history.slice(this.persistedCount),
-					);
-					this.persistedCount = this.history.length;
-				} else {
-					await saveConversation(
-						this.app,
-						this.plugin.settings,
-						this.conversationPath,
-						this.history,
-					);
-				}
-			} catch (e) {
-				new Notice(`Could not save conversation: ${e instanceof Error ? e.message : String(e)}`);
+		// A conversation that has a file keeps up with the panel: the first save
+		// is a decision, the ones after it are not.
+		if (this.conversationPath) await this.saveNow();
+		this.updateSaveButton();
+	}
+
+	/**
+	 * Write the conversation to the vault: all of it the first time, only what
+	 * is new after that. Returns the path written, or null if nothing was.
+	 */
+	private async saveNow(interrupted = false): Promise<string | null> {
+		if (this.history.length <= 1) return null;
+		try {
+			if (!this.conversationPath) {
+				this.conversationPath = await this.newConversationPath(
+					this.firstUserMessage(),
+					interrupted,
+				);
 			}
+			if (this.persistedCount > 0) {
+				// Append only the new turns, so what is already in the file —
+				// including its record of tool calls — is preserved as saved.
+				await appendConversation(
+					this.app,
+					this.conversationPath,
+					this.history.slice(this.persistedCount),
+				);
+			} else {
+				await saveConversation(
+					this.app,
+					this.plugin.settings,
+					this.conversationPath,
+					this.history,
+				);
+			}
+			this.persistedCount = this.history.length;
+			this.updateSaveButton();
+			return this.conversationPath;
+		} catch (e) {
+			new Notice(`Could not save conversation: ${e instanceof Error ? e.message : String(e)}`);
+			return null;
 		}
+	}
+
+	/** The Save button: the same write, plus something to show for it. */
+	private async saveFromButton(): Promise<void> {
+		if (this.busy) {
+			this.busyNotice();
+			return;
+		}
+		this.setStatus('Saving…');
+		const path = await this.saveNow();
+		this.setStatus(null);
+		if (path) new Notice(`Saved to ${path}`);
+	}
+
+	/** Whether the panel is holding anything the vault hasn't got. */
+	private hasUnsavedMessages(): boolean {
+		return this.history.length > Math.max(1, this.persistedCount);
+	}
+
+	/**
+	 * Ask before throwing an unsaved conversation away. True means carry on —
+	 * either it was saved just now, or the user said to drop it.
+	 */
+	private async confirmDiscard(): Promise<boolean> {
+		if (!this.hasUnsavedMessages()) return true;
+		const choice = await askUnsavedChat(this.app, {
+			title: 'This conversation has not been saved',
+			body: 'It only exists in this panel. Save it to the conversations folder, or discard it and carry on.',
+			saveLabel: 'Save',
+			discardLabel: 'Discard',
+		});
+		if (choice === 'cancel') return false;
+		// A save that failed has already said so; carrying on would throw away
+		// what the user just asked to keep.
+		if (choice === 'save') return (await this.saveNow()) !== null;
+		return true;
+	}
+
+	/** The message the file gets named after. */
+	private firstUserMessage(): string {
+		return this.history.find((m) => m.role === 'user')?.content.trim() || 'Conversation';
+	}
+
+	/** Nothing to save, or nothing left to save, is worth showing on the button. */
+	private updateSaveButton(): void {
+		if (!this.saveBtn) return;
+		const unsaved = this.hasUnsavedMessages();
+		this.saveBtn.disabled = !unsaved;
+		this.saveBtn.setAttr(
+			'aria-label',
+			unsaved
+				? 'Save this conversation'
+				: this.conversationPath
+					? `Saved to ${this.conversationPath}`
+					: 'Nothing to save yet',
+		);
 	}
 
 	/** Open the workflow modal (also reachable via the "Run workflow" command). */
