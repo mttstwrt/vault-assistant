@@ -404,7 +404,6 @@
 
 .va-status {
 	font-size: var(--font-ui-smaller);
-	font-style: italic;
 	color: var(--text-faint);
 	padding: 4px 10px 0;
 }
@@ -635,4 +634,50 @@
 }
 .va-new:disabled:hover {
 	color: var(--text-muted);
+}
+
+/* The status strip: what is happening on the left, how full the context is on
+   the right. Either can be absent without the other moving. */
+.va-status {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+.va-status-text {
+	flex: 1 1 auto;
+	min-width: 0;
+	font-style: italic;
+}
+
+.va-context {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	flex: 0 0 auto;
+	color: var(--text-faint);
+	font-variant-numeric: tabular-nums;
+	font-style: normal;
+}
+.va-context-ring {
+	width: 14px;
+	height: 14px;
+	/* Start the arc at twelve o'clock rather than three. */
+	transform: rotate(-90deg);
+}
+.va-context-track {
+	stroke: var(--background-modifier-border);
+	stroke-width: 3;
+}
+.va-context-fill {
+	stroke: currentColor;
+	stroke-width: 3;
+	stroke-linecap: round;
+	transition: stroke-dasharray 200ms ease-out;
+}
+/* Filling up, then nearly out. */
+.va-context.va-context-warn {
+	color: var(--text-warning);
+}
+.va-context.va-context-danger {
+	color: var(--text-error);
 }

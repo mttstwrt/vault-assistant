@@ -46,6 +46,20 @@ export default class VaultAssistantPlugin extends Plugin {
 			callback: () => void this.activateView(),
 		});
 
+		// Ctrl/Cmd+S does this while the chat panel has focus; the command lets
+		// you bind your own hotkey and reach it from anywhere. No default key:
+		// a plugin claiming one is a conflict waiting to happen.
+		this.addCommand({
+			id: 'save-conversation',
+			name: 'Save the current conversation',
+			checkCallback: (checking: boolean) => {
+				const view = this.app.workspace.getLeavesOfType(VIEW_TYPE_CHAT)[0]?.view;
+				if (!(view instanceof ChatView) || !view.hasUnsavedMessages()) return false;
+				if (!checking) void view.saveConversation();
+				return true;
+			},
+		});
+
 		// Ctrl+C does this while the chat panel has focus; the command lets you
 		// bind your own hotkey and reach it from anywhere.
 		this.addCommand({

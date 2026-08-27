@@ -1,5 +1,6 @@
 /**
- * Working out which reasoning-effort levels a model actually has.
+ * What an endpoint will say about the model it is serving: which
+ * reasoning-effort levels it has, and how big its context window is.
  *
  * There is no standard for this: OpenAI's /v1/models returns an id and little
  * else, and nothing in the OpenAI schema enumerates the values
@@ -72,10 +73,23 @@ export type EffortSupport =
 
 interface ServerProps {
 	chat_template?: string;
+	/** Some builds report the window at the root; others only per-slot. */
+	n_ctx?: number;
+	default_generation_settings?: { n_ctx?: number };
 }
 
+/** What one endpoint told us about the model it is serving. */
+export interface ServerFacts {
+	effort: EffortSupport;
+	/** Context window in tokens, or null when the endpoint didn't say. */
+	contextSize: number | null;
+}
+
+/** Nothing established: an endpoint that wouldn't answer, or couldn't be read. */
+const NOTHING: ServerFacts = { effort: { kind: 'unknown' }, contextSize: null };
+
 /** One lookup per endpoint, shared between callers and kept for the session. */
-const cache = new Map<string, Promise<EffortSupport>>();
+const cache = new Map<string, Promise<ServerFacts>>();
 
 /** The server root: /props sits beside /v1, not inside it. */
 function propsUrl(baseUrl: string): string {
@@ -112,11 +126,11 @@ export function effortSupportInTemplate(template: string): EffortSupport {
 }
 
 /**
- * Ask the endpoint which effort levels its model understands. Anything that
- * stops us reading a template — a server without /props, a refusal, a body we
- * can't parse — comes back as 'unknown' rather than as an empty answer.
+ * Ask the endpoint about its model. Anything that stops us reading the answer —
+ * a server without /props, a refusal, a body we can't parse — comes back as
+ * nothing established rather than as an empty answer.
  */
-export function serverEffortSupport(baseUrl: string, apiKey: string): Promise<EffortSupport> {
+export function serverFacts(baseUrl: string, apiKey: string): Promise<ServerFacts> {
 	const url = propsUrl(baseUrl);
 	const hit = cache.get(url);
 	if (hit) return hit;
@@ -132,20 +146,25 @@ export function serverEffortSupport(baseUrl: string, apiKey: string): Promise<Ef
 		},
 		() => directRequest({ url, method: 'GET', headers }),
 	)
-		.then((res): EffortSupport => {
-			if (res.status >= 400) return { kind: 'unknown' };
+		.then((res): ServerFacts => {
+			if (res.status >= 400) return NOTHING;
 			const props = JSON.parse(res.text) as ServerProps;
 			// A /props without a template is a server we can't read, not a
 			// model that ignores the parameter.
 			const template = props?.chat_template;
-			return typeof template === 'string' && template
-				? effortSupportInTemplate(template)
-				: { kind: 'unknown' };
+			const ctx = props?.n_ctx ?? props?.default_generation_settings?.n_ctx;
+			return {
+				effort:
+					typeof template === 'string' && template
+						? effortSupportInTemplate(template)
+						: { kind: 'unknown' },
+				contextSize: typeof ctx === 'number' && ctx > 0 ? ctx : null,
+			};
 		})
-		.catch((e: unknown): EffortSupport => {
+		.catch((e: unknown): ServerFacts => {
 			// Endpoints that don't serve /props are the common case, not an error.
-			console.debug('[vault-assistant] No effort levels from', url, describeRequestError(e, url));
-			return { kind: 'unknown' };
+			console.debug('[vault-assistant] Nothing from', url, describeRequestError(e, url));
+			return NOTHING;
 		});
 
 	cache.set(url, lookup);
@@ -153,6 +172,6 @@ export function serverEffortSupport(baseUrl: string, apiKey: string): Promise<Ef
 }
 
 /** Forget what an endpoint said, so a model swap can be picked up. */
-export function clearEffortCache(): void {
+export function clearServerFacts(): void {
 	cache.clear();
 }

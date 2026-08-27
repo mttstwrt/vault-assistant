@@ -1,7 +1,7 @@
 import { App, PluginSettingTab, Setting, TextComponent } from 'obsidian';
 import type VaultAssistantPlugin from './main';
 import { clearModelCache, filterModels, listModels, modelLabel } from './api/models';
-import { clearEffortCache } from './api/props';
+import { clearServerFacts } from './api/props';
 import { loadWorkflows } from './workflows/schema';
 import { WORKFLOW_PRESETS } from './workflows/presets';
 
@@ -284,7 +284,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		if (url !== this.lastEndpoint) clearModelCache();
 		this.lastEndpoint = url;
 		this.lastModel = model;
-		clearEffortCache();
+		clearServerFacts();
 		this.plugin.refreshEndpointControls();
 	};
 

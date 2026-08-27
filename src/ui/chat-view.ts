@@ -15,8 +15,8 @@ import {
 	COMMON_EFFORT_LEVELS,
 	EFFORT_LEVELS,
 	EffortSupport,
-	clearEffortCache,
-	serverEffortSupport,
+	clearServerFacts,
+	serverFacts,
 } from '../api/props';
 import { discoverModels, filterModels, modelLabel } from '../api/models';
 import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
@@ -37,6 +37,7 @@ import { suggestConversationTitle } from '../title';
 import { buildOpenFilesBlock, stripOpenFiles } from '../tools/workspace';
 import { AssistantTurn } from './assistant-turn';
 import { ThinkingSection } from './thinking';
+import { ContextRing } from './context-ring';
 import { fitToContent } from './autogrow';
 import {
 	addAssistantBubble,
@@ -68,6 +69,13 @@ export class ChatView extends ItemView {
 
 	private messagesEl!: HTMLElement;
 	private statusEl!: HTMLElement;
+	private statusTextEl!: HTMLElement;
+	private contextRing!: ContextRing;
+	/** What the status strip is saying, so the ring can redraw without it. */
+	private statusText: string | null = null;
+	/** The window the endpoint reported, and the prompt it last counted. */
+	private contextSize: number | null = null;
+	private promptTokens: number | null = null;
 	private inputEl!: HTMLTextAreaElement;
 	private modelEl!: HTMLSelectElement;
 	private effortEl!: HTMLSelectElement;
@@ -149,7 +157,7 @@ export class ChatView extends ItemView {
 			attr: { 'aria-label': 'Save this conversation' },
 		});
 		setIcon(this.saveBtn, 'save');
-		this.saveBtn.onclick = () => void this.saveFromButton();
+		this.saveBtn.onclick = () => void this.saveConversation();
 
 		const importBtn = header.createEl('button', {
 			cls: 'va-new',
@@ -211,7 +219,7 @@ export class ChatView extends ItemView {
 		});
 		// Narrow the list to what this model actually understands, if the
 		// endpoint is willing to say (llama.cpp is; most aren't).
-		this.refreshEffortLevels();
+		this.refreshServerFacts();
 
 		this.messagesEl = root.createDiv({ cls: 'va-messages' });
 
@@ -242,7 +250,11 @@ export class ChatView extends ItemView {
 			this.followOutput = el.scrollTop + el.clientHeight >= el.scrollHeight - FOLLOW_SLACK;
 		});
 
+		// The strip holds the ring as well as the status, so it outlives any one
+		// message: "Thinking…" comes and goes, how full the context is does not.
 		this.statusEl = root.createDiv({ cls: 'va-status' });
+		this.statusTextEl = this.statusEl.createSpan({ cls: 'va-status-text' });
+		this.contextRing = new ContextRing(this.statusEl);
 		this.setStatus(null);
 
 		const inputRow = root.createDiv({ cls: 'va-input-row' });
@@ -270,6 +282,16 @@ export class ChatView extends ItemView {
 			if (!this.busy || this.hasSelection()) return;
 			evt.preventDefault();
 			this.interrupt();
+		});
+
+		// Ctrl/Cmd+S keeps the conversation, the way it keeps a note. It shadows
+		// Obsidian's own save only while this panel has focus, where there is no
+		// note to save — and stops the event there so nothing else answers it.
+		this.registerDomEvent(this.containerEl, 'keydown', (evt) => {
+			if (evt.key.toLowerCase() !== 's' || !(evt.ctrlKey || evt.metaKey) || evt.altKey) return;
+			evt.preventDefault();
+			evt.stopPropagation();
+			void this.saveConversation();
 		});
 
 		this.mounted = true;
@@ -306,7 +328,22 @@ export class ChatView extends ItemView {
 	 */
 	refreshEndpointControls(): void {
 		this.refreshModels();
-		this.refreshEffortLevels();
+		this.refreshServerFacts();
+	}
+
+	/**
+	 * Ask the endpoint about the model again: which effort levels it has, and
+	 * how much context it has to fill. One request answers for both. The panel
+	 * works this out when it opens, so a change of endpoint or model would
+	 * otherwise leave it describing the model that was there before.
+	 */
+	private refreshServerFacts(): void {
+		void serverFacts(this.plugin.settings.baseUrl, this.plugin.settings.apiKey).then((facts) => {
+			if (!this.mounted) return;
+			this.renderEffortOptions(facts.effort);
+			this.contextSize = facts.contextSize;
+			this.updateContextRing();
+		});
 	}
 
 	/** Look up the endpoint's models again and redraw the selector. */
@@ -341,21 +378,8 @@ export class ChatView extends ItemView {
 	private async applyModel(id: string): Promise<void> {
 		this.plugin.settings.model = id;
 		await this.plugin.saveSettings();
-		clearEffortCache();
-		this.refreshEffortLevels();
-	}
-
-	/**
-	 * Ask the endpoint again which effort levels its model has, and redraw the
-	 * selector. The panel narrows the list once when it opens, so a change of
-	 * endpoint or model leaves it describing the model that was there before.
-	 */
-	refreshEffortLevels(): void {
-		void serverEffortSupport(this.plugin.settings.baseUrl, this.plugin.settings.apiKey).then(
-			(support) => {
-				if (this.mounted) this.renderEffortOptions(support);
-			},
-		);
+		clearServerFacts();
+		this.refreshServerFacts();
 	}
 
 	/**
@@ -513,6 +537,9 @@ export class ChatView extends ItemView {
 		this.sessionMcp.clear();
 		// Collected notes belong to the conversation that collected them.
 		this.prePassBlock = null;
+		// The window is the endpoint's; what fills it belongs to the conversation.
+		this.promptTokens = null;
+		this.updateContextRing();
 		this.updateSaveButton();
 		this.messagesEl.empty();
 		this.followOutput = true;
@@ -540,6 +567,9 @@ export class ChatView extends ItemView {
 		this.sessionMcp.clear();
 		// Collected notes belong to the conversation that collected them.
 		this.prePassBlock = null;
+		// The window is the endpoint's; what fills it belongs to the conversation.
+		this.promptTokens = null;
+		this.updateContextRing();
 		this.updateSaveButton();
 		this.messagesEl.empty();
 		this.followOutput = true;
@@ -631,10 +661,23 @@ export class ChatView extends ItemView {
 
 	/** The one-line "what is happening" strip above the composer. */
 	private setStatus(text: string | null): void {
+		this.statusText = text;
+		this.renderStatus();
+	}
+
+	private renderStatus(): void {
 		// While an answer can still be cut off, say how.
 		const stoppable = !!this.abort && !this.abort.signal.aborted;
-		this.statusEl.setText(text ? `${text}${stoppable ? ' · Ctrl+C to stop' : ''}` : '');
-		this.statusEl.toggleClass('va-hidden', !text);
+		const text = this.statusText;
+		this.statusTextEl.setText(text ? `${text}${stoppable ? ' · Ctrl+C to stop' : ''}` : '');
+		// The strip goes only when it has nothing at all to carry.
+		this.statusEl.toggleClass('va-hidden', !text && !this.contextRing.visible);
+	}
+
+	/** Redraw the ring from the last counted prompt and the window it fills. */
+	private updateContextRing(): void {
+		this.contextRing.update(this.promptTokens, this.contextSize);
+		this.renderStatus();
 	}
 
 	private async addAssistantBubble(markdown: string): Promise<void> {
@@ -805,6 +848,14 @@ export class ChatView extends ItemView {
 					onToolResult: (call, res) => this.addToolResult(call, res),
 					onError: (msg) => this.addError(msg),
 					onFileChange: (change) => this.addFileChange(change),
+					// The prompt the endpoint just counted is what the
+					// conversation occupies, so the ring follows the last call.
+					onStats: (stats) => {
+						if (stats.promptTokens) {
+							this.promptTokens = stats.promptTokens;
+							this.updateContextRing();
+						}
+					},
 					requestApproval: (req) => this.requestApproval(req),
 					stream: {
 						onStart: () => {
@@ -889,8 +940,11 @@ export class ChatView extends ItemView {
 		}
 	}
 
-	/** The Save button: the same write, plus something to show for it. */
-	private async saveFromButton(): Promise<void> {
+	/**
+	 * Keep this conversation, and say where it went. Shared by the button, the
+	 * Ctrl/Cmd+S shortcut and the command.
+	 */
+	async saveConversation(): Promise<void> {
 		if (this.busy) {
 			this.busyNotice();
 			return;
@@ -902,7 +956,7 @@ export class ChatView extends ItemView {
 	}
 
 	/** Whether the panel is holding anything the vault hasn't got. */
-	private hasUnsavedMessages(): boolean {
+	hasUnsavedMessages(): boolean {
 		return this.history.length > Math.max(1, this.persistedCount);
 	}
 

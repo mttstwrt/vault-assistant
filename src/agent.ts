@@ -29,6 +29,13 @@ export interface AgentEvents {
 	/** A file the agent wrote, so the panel can show the diff. */
 	onFileChange?: (change: FileChange) => void;
 	/**
+	 * What one model call cost, after every call and whether or not it was
+	 * streamed. `stream.onDone` carries the same figures for a streamed turn,
+	 * but only for a streamed turn — this is for anything tracking the run
+	 * itself, like how full the context is getting.
+	 */
+	onStats?: (stats: CallStats) => void;
+	/**
 	 * Render turns as they stream. When provided (and streaming is enabled in
 	 * settings) assistant content is reported here instead of onAssistant.
 	 */
@@ -145,6 +152,7 @@ export async function runAgent(
 			return history;
 		}
 		stream?.onDone({ stats: result.stats, aborted: !!result.aborted });
+		if (result.stats) events.onStats?.(result.stats);
 
 		if (result.aborted) {
 			// Keep the partial answer as context, but drop any half-formed tool
