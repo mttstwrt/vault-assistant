@@ -54,7 +54,14 @@ export interface CallOverrides {
 }
 
 /** Fields the extra-params passthrough may never clobber. */
-const PROTECTED_BODY_KEYS = new Set(['model', 'messages', 'tools', 'tool_choice', 'stream']);
+const PROTECTED_BODY_KEYS = new Set([
+	'model',
+	'messages',
+	'tools',
+	'tool_choice',
+	'stream',
+	'stream_options',
+]);
 
 /** Parse the extra-body-params setting; invalid JSON is ignored with a warning. */
 function extraBodyParams(settings: VaultAssistantSettings): Record<string, unknown> {
@@ -139,7 +146,14 @@ export function chatRequestBody(
 		body.tools = tools.map((t) => ({ type: 'function', function: t }));
 		body.tool_choice = 'auto';
 	}
-	if (stream) body.stream = true;
+	if (stream) {
+		body.stream = true;
+		// Without asking, an OpenAI-compatible server sends no usage block on a
+		// stream at all, so nothing downstream can say what a turn cost or how
+		// full the context is. llama.cpp volunteers its own `timings` and needs
+		// no asking; everything else does.
+		body.stream_options = { include_usage: true };
+	}
 	return body;
 }
 

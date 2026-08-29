@@ -404,12 +404,15 @@
 
 .va-status {
 	font-size: var(--font-ui-smaller);
+	font-style: italic;
 	color: var(--text-faint);
 	padding: 4px 10px 0;
 }
 
+/* A utility, so it beats whatever display a component sets for itself —
+   without this it depends on which rule happens to come later in the file. */
 .va-hidden {
-	display: none;
+	display: none !important;
 }
 
 .va-input-row {
@@ -636,27 +639,17 @@
 	color: var(--text-muted);
 }
 
-/* The status strip: what is happening on the left, how full the context is on
-   the right. Either can be absent without the other moving. */
-.va-status {
-	display: flex;
-	align-items: center;
-	gap: 8px;
-}
-.va-status-text {
-	flex: 1 1 auto;
-	min-width: 0;
-	font-style: italic;
-}
-
+/* How full the context is, alongside the model whose window it is. */
 .va-context {
+	position: relative;
 	display: inline-flex;
 	align-items: center;
 	gap: 4px;
 	flex: 0 0 auto;
 	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
 	font-variant-numeric: tabular-nums;
-	font-style: normal;
+	cursor: default;
 }
 .va-context-ring {
 	width: 14px;
@@ -680,4 +673,36 @@
 }
 .va-context.va-context-danger {
 	color: var(--text-error);
+}
+
+/* The detail, on hover: anchored under the ring and growing rightwards, so a
+   narrow panel clips it at neither edge. */
+.va-context-popup {
+	position: absolute;
+	top: calc(100% + 6px);
+	left: 0;
+	z-index: var(--layer-popover);
+	width: max-content;
+	max-width: 240px;
+	padding: 8px 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 8px;
+	background: var(--background-secondary);
+	box-shadow: var(--shadow-s);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+	font-variant-numeric: tabular-nums;
+	line-height: 1.5;
+	white-space: nowrap;
+}
+.va-context-popup-title {
+	color: var(--text-muted);
+	font-size: var(--font-smallest);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+.va-context-popup-note {
+	color: var(--text-faint);
+	font-size: var(--font-smallest);
+	white-space: normal;
 }

@@ -19,6 +19,7 @@ import {
 	serverFacts,
 } from '../api/props';
 import { discoverModels, filterModels, modelLabel } from '../api/models';
+import { CallStats } from '../api/client';
 import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
 import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
@@ -69,13 +70,10 @@ export class ChatView extends ItemView {
 
 	private messagesEl!: HTMLElement;
 	private statusEl!: HTMLElement;
-	private statusTextEl!: HTMLElement;
 	private contextRing!: ContextRing;
-	/** What the status strip is saying, so the ring can redraw without it. */
-	private statusText: string | null = null;
-	/** The window the endpoint reported, and the prompt it last counted. */
+	/** The window the endpoint reported, and what it counted for the last call. */
 	private contextSize: number | null = null;
-	private promptTokens: number | null = null;
+	private lastStats: CallStats | null = null;
 	private inputEl!: HTMLTextAreaElement;
 	private modelEl!: HTMLSelectElement;
 	private effortEl!: HTMLSelectElement;
@@ -189,6 +187,9 @@ export class ChatView extends ItemView {
 		// buttons and leaving the effort selector stranded below it.
 		const controls = header.createDiv({ cls: 'va-controls' });
 
+		// How full the window is belongs next to the model whose window it is.
+		this.contextRing = new ContextRing(controls);
+
 		// Which model answers. The endpoint's own list when it has one, and
 		// always the configured name — an endpoint that can't list models still
 		// shows what it is set to rather than going blank.
@@ -250,11 +251,7 @@ export class ChatView extends ItemView {
 			this.followOutput = el.scrollTop + el.clientHeight >= el.scrollHeight - FOLLOW_SLACK;
 		});
 
-		// The strip holds the ring as well as the status, so it outlives any one
-		// message: "Thinking…" comes and goes, how full the context is does not.
 		this.statusEl = root.createDiv({ cls: 'va-status' });
-		this.statusTextEl = this.statusEl.createSpan({ cls: 'va-status-text' });
-		this.contextRing = new ContextRing(this.statusEl);
 		this.setStatus(null);
 
 		const inputRow = root.createDiv({ cls: 'va-input-row' });
@@ -538,7 +535,7 @@ export class ChatView extends ItemView {
 		// Collected notes belong to the conversation that collected them.
 		this.prePassBlock = null;
 		// The window is the endpoint's; what fills it belongs to the conversation.
-		this.promptTokens = null;
+		this.lastStats = null;
 		this.updateContextRing();
 		this.updateSaveButton();
 		this.messagesEl.empty();
@@ -568,7 +565,7 @@ export class ChatView extends ItemView {
 		// Collected notes belong to the conversation that collected them.
 		this.prePassBlock = null;
 		// The window is the endpoint's; what fills it belongs to the conversation.
-		this.promptTokens = null;
+		this.lastStats = null;
 		this.updateContextRing();
 		this.updateSaveButton();
 		this.messagesEl.empty();
@@ -661,23 +658,26 @@ export class ChatView extends ItemView {
 
 	/** The one-line "what is happening" strip above the composer. */
 	private setStatus(text: string | null): void {
-		this.statusText = text;
-		this.renderStatus();
-	}
-
-	private renderStatus(): void {
 		// While an answer can still be cut off, say how.
 		const stoppable = !!this.abort && !this.abort.signal.aborted;
-		const text = this.statusText;
-		this.statusTextEl.setText(text ? `${text}${stoppable ? ' · Ctrl+C to stop' : ''}` : '');
-		// The strip goes only when it has nothing at all to carry.
-		this.statusEl.toggleClass('va-hidden', !text && !this.contextRing.visible);
+		this.statusEl.setText(text ? `${text}${stoppable ? ' · Ctrl+C to stop' : ''}` : '');
+		this.statusEl.toggleClass('va-hidden', !text);
 	}
 
-	/** Redraw the ring from the last counted prompt and the window it fills. */
+	/** Redraw the ring from the last exchange and the window it filled. */
 	private updateContextRing(): void {
-		this.contextRing.update(this.promptTokens, this.contextSize);
-		this.renderStatus();
+		const size = this.contextSize;
+		const stats = this.lastStats;
+		this.contextRing.update(
+			size && stats?.promptTokens
+				? {
+						promptTokens: stats.promptTokens,
+						completionTokens: stats.completionTokens ?? 0,
+						contextSize: size,
+						model: modelLabel(this.plugin.settings.model),
+					}
+				: null,
+		);
 	}
 
 	private async addAssistantBubble(markdown: string): Promise<void> {
@@ -848,13 +848,13 @@ export class ChatView extends ItemView {
 					onToolResult: (call, res) => this.addToolResult(call, res),
 					onError: (msg) => this.addError(msg),
 					onFileChange: (change) => this.addFileChange(change),
-					// The prompt the endpoint just counted is what the
-					// conversation occupies, so the ring follows the last call.
+					// The prompt the endpoint just counted, plus the answer to
+					// it, is what the next one will carry — so the ring follows
+					// the last call rather than the last message.
 					onStats: (stats) => {
-						if (stats.promptTokens) {
-							this.promptTokens = stats.promptTokens;
-							this.updateContextRing();
-						}
+						if (!stats.promptTokens) return;
+						this.lastStats = stats;
+						this.updateContextRing();
 					},
 					requestApproval: (req) => this.requestApproval(req),
 					stream: {

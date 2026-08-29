@@ -1,13 +1,13 @@
 /**
- * How much of the model's context window this conversation is using, as a
- * ring beside the status line.
+ * How much of the model's context window this conversation is using, as a ring
+ * beside the model it belongs to, with the figures behind it on hover.
  *
- * Both numbers are measured rather than estimated. The used figure is
- * `prompt_tokens` from the last response — the tokens the endpoint itself
- * counted for the prompt it just read, which is exactly what the conversation
- * occupies. The window comes from llama.cpp's /props. An endpoint that reports
- * neither gets no ring at all: a guessed context bar is worse than none, since
- * the number it shows would be believed.
+ * Both numbers are measured rather than estimated. What is used is the last
+ * request's `prompt_tokens` plus the answer that came back — the tokens the
+ * endpoint itself counted, which together are what the next request will carry.
+ * The window comes from llama.cpp's /props. An endpoint that reports neither
+ * gets no ring: a guessed context bar is worse than none, because the number it
+ * shows would be believed.
  */
 
 /** Geometry of the ring, in the units of its 20×20 viewBox. */
@@ -18,10 +18,23 @@ const CIRCUMFERENCE = 2 * Math.PI * RADIUS;
 const WARN_AT = 0.75;
 const DANGER_AT = 0.9;
 
+/** What the endpoint counted for the last exchange, and what it counted against. */
+export interface ContextUse {
+	/** Tokens in the last prompt: the conversation as the model last read it. */
+	promptTokens: number;
+	/** Tokens in the answer to it, which the next prompt will carry too. */
+	completionTokens: number;
+	/** The window those fill. */
+	contextSize: number;
+	/** Whose window it is, for the popup. */
+	model: string;
+}
+
 export class ContextRing {
 	private el: HTMLElement;
 	private fill: SVGCircleElement;
 	private label: HTMLElement;
+	private popup: HTMLElement;
 	private shown = false;
 
 	constructor(parent: HTMLElement) {
@@ -43,51 +56,78 @@ export class ContextRing {
 		this.fill.setAttr('stroke-dasharray', `0 ${CIRCUMFERENCE}`);
 
 		this.label = this.el.createSpan({ cls: 'va-context-label' });
+
+		// Built once and shown by class, so hovering costs no layout work.
+		this.popup = this.el.createDiv({ cls: 'va-context-popup va-hidden' });
+		const reveal = (visible: boolean): void => this.popup.toggleClass('va-hidden', !visible);
+		this.el.addEventListener('mouseenter', () => reveal(true));
+		this.el.addEventListener('mouseleave', () => reveal(false));
+		// Reachable without a mouse: the ring takes focus, and says what it is.
+		this.el.tabIndex = 0;
+		this.el.addEventListener('focus', () => reveal(true));
+		this.el.addEventListener('blur', () => reveal(false));
 	}
 
-	/** Whether there is anything to show, so the strip can size itself. */
+	/** Whether there is anything to show. */
 	get visible(): boolean {
 		return this.shown;
 	}
 
-	/**
-	 * Show `used` of `total` tokens. Either one missing hides the ring — that
-	 * is the endpoint declining to say, not a conversation using nothing.
-	 */
-	update(used: number | null, total: number | null): void {
-		if (!used || !total || total <= 0) {
+	/** Show what `use` describes, or hide the ring when there is nothing to show. */
+	update(use: ContextUse | null): void {
+		if (!use || use.contextSize <= 0 || use.promptTokens <= 0) {
 			this.hide();
 			return;
 		}
 
-		// A prompt can exceed the window the server reported (a model swapped
-		// behind the same endpoint, a server that grew its slots); a ring past
-		// full would just look broken, so it pins and the number tells the truth.
-		const ratio = Math.min(used / total, 1);
+		const used = use.promptTokens + use.completionTokens;
+		// A conversation can outgrow the window the server reported (a model
+		// swapped behind the same endpoint, a server that grew its slots); a
+		// ring past full would look broken, so it pins and the figures tell the
+		// truth underneath.
+		const ratio = Math.min(used / use.contextSize, 1);
+		const percent = Math.min(Math.round((used / use.contextSize) * 100), 100);
+
 		this.fill.setAttr('stroke-dasharray', `${ratio * CIRCUMFERENCE} ${CIRCUMFERENCE}`);
 		this.el.toggleClass('va-context-warn', ratio >= WARN_AT && ratio < DANGER_AT);
 		this.el.toggleClass('va-context-danger', ratio >= DANGER_AT);
+		this.label.setText(`${percent}%`);
+		this.el.setAttr('aria-label', `Context: ${percent}% of ${compact(use.contextSize)} tokens used`);
 
-		this.label.setText(`${Math.round((used / total) * 100)}%`);
-		this.el.setAttr(
-			'aria-label',
-			`Context: ${compact(used)} of ${compact(total)} tokens (${Math.round((used / total) * 100)}%)`,
-		);
-		this.el.setAttr(
-			'title',
-			`${compact(used)} of ${compact(total)} tokens of context used, as counted by the endpoint.`,
-		);
+		this.renderPopup(use, used, percent);
 		this.el.removeClass('va-hidden');
 		this.shown = true;
 	}
 
 	hide(): void {
 		this.el.addClass('va-hidden');
+		this.popup.addClass('va-hidden');
 		this.shown = false;
+	}
+
+	private renderPopup(use: ContextUse, used: number, percent: number): void {
+		const free = Math.max(use.contextSize - used, 0);
+		this.popup.empty();
+		this.popup.createDiv({ cls: 'va-context-popup-title', text: 'Context window' });
+		this.popup.createDiv({
+			text: `${count(used)} of ${count(use.contextSize)} tokens · ${percent}%`,
+		});
+		this.popup.createDiv({ text: `${count(free)} free` });
+		this.popup.createDiv({
+			cls: 'va-context-popup-note',
+			text:
+				`Last exchange: ${count(use.promptTokens)} prompt + ${count(use.completionTokens)} answer, ` +
+				`counted by the endpoint for ${use.model || 'this model'}.`,
+		});
 	}
 }
 
-/** 12400 → "12.4k", so the tooltip stays one short line. */
+/** 12431 → "12,431", for the popup, where the exact figure is the point. */
+function count(tokens: number): string {
+	return tokens.toLocaleString();
+}
+
+/** 32768 → "33k", for the one-line label. */
 function compact(tokens: number): string {
 	if (tokens < 1000) return String(tokens);
 	const thousands = tokens / 1000;
