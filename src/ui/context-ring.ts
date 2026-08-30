@@ -35,7 +35,7 @@ export class ContextRing {
 		this.el = parent.createDiv({ cls: 'va-ring', attr: { 'aria-label': 'Context usage' } });
 		const svg = this.el.createSvg('svg', { attr: { viewBox: '0 0 32 32', fill: 'none' } });
 		const circle = { cx: 16, cy: 16, r: RADIUS, stroke: 'currentColor', 'stroke-width': 3 };
-		svg.createSvg('circle', { cls: 'va-ring-track', attr: { ...circle, 'stroke-opacity': 0.1 } });
+		svg.createSvg('circle', { cls: 'va-ring-track', attr: circle });
 		this.arc = svg.createSvg('circle', {
 			cls: 'va-ring-arc',
 			attr: {

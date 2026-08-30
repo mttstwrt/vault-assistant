@@ -24,12 +24,12 @@ Approved 2026-08-30, including the loaded/unloaded marker in §3.
 
 ## QOL-3 — Model selector
 
-- [ ] `models.ts`: `{ id, status? }` entries, session cache, `clearModelCache`
-- [ ] `settings.ts`: picker adapts to the richer entries
-- [ ] `chat-view.ts`: the dropdown, disabled while busy, re-reads `n_ctx` on change
-- [ ] `styles.css`: `.va-model`
+- [x] `models.ts`: `{ id, status? }` entries, session cache, `clearModelCache`
+- [x] `settings.ts`: picker adapts to the richer entries
+- [x] `chat-view.ts`: the dropdown, disabled while busy, re-reads `n_ctx` on change
+- [x] `styles.css`: `.va-model`
 
 ## Close-out
 
-- [ ] `npm run lint` and `npm run build`
+- [x] `npm run lint` and `npm run build`
 - [ ] Fold the durable parts into `README.md`, delete `docs/_planning/chat-panel-qol/`

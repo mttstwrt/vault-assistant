@@ -11,6 +11,7 @@ import {
 } from 'obsidian';
 import type VaultAssistantPlugin from '../main';
 import { serverContextSize } from '../api/props';
+import { ModelEntry, filterModels, listModels, modelOptionLabel } from '../api/models';
 import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
 import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
@@ -62,6 +63,7 @@ export class ChatView extends ItemView {
 	private statusEl!: HTMLElement;
 	private inputEl!: HTMLTextAreaElement;
 	private sendBtn!: HTMLButtonElement;
+	private modelEl!: HTMLSelectElement;
 	private ring!: ContextRing;
 	private toolEls = new Map<string, HTMLElement>();
 	/** Write paths the user approved for the rest of this conversation. */
@@ -148,6 +150,21 @@ export class ChatView extends ItemView {
 		setIcon(workflowBtn, 'telescope');
 		workflowBtn.onclick = () => this.openWorkflowModal();
 
+		// Which model is answering, and what else this endpoint serves. The
+		// panel and the settings tab share one field, so choosing here is the
+		// same act as choosing there.
+		this.modelEl = header.createEl('select', {
+			cls: 'dropdown va-model',
+			attr: { 'aria-label': 'Model' },
+		});
+		this.renderModelOptions([]);
+		this.registerDomEvent(this.modelEl, 'change', () => {
+			this.plugin.settings.model = this.modelEl.value;
+			void this.plugin.saveSettings();
+			// A different model is a different context window.
+			this.refreshContextTotal();
+		});
+
 		// How full the model's context window is. Both numbers come from the
 		// endpoint, so an endpoint that reports neither shows an empty ring
 		// rather than a made-up one.
@@ -214,6 +231,7 @@ export class ChatView extends ItemView {
 
 		this.mounted = true;
 		this.refreshContextTotal();
+		this.loadModelOptions();
 		// Continue the conversation this panel was showing before it moved
 		// windows (or before Obsidian restarted); otherwise start fresh.
 		const pending = this.pendingPath;
@@ -236,6 +254,50 @@ export class ChatView extends ItemView {
 	/** True while a message or workflow run is in flight. */
 	isBusy(): boolean {
 		return this.busy;
+	}
+
+	/**
+	 * The endpoint or the model may have been changed in settings while this
+	 * panel was open; the header shows both, so it re-reads both.
+	 */
+	settingsChanged(): void {
+		if (!this.mounted) return;
+		this.refreshContextTotal();
+		this.loadModelOptions();
+	}
+
+	/** Offer the models this endpoint advertises. Failure leaves the current one. */
+	private loadModelOptions(): void {
+		const { baseUrl, apiKey } = this.plugin.settings;
+		void listModels(baseUrl, apiKey)
+			.then((models) => {
+				if (this.mounted) this.renderModelOptions(filterModels(models, 'chat'));
+			})
+			.catch((e: unknown) => {
+				// The settings tab is where a discovery failure gets explained;
+				// the header just keeps showing the configured model.
+				console.debug('[vault-assistant] No model list for the panel:', e);
+				if (this.mounted) this.renderModelOptions([]);
+			});
+	}
+
+	/**
+	 * Fill the model selector. The configured model is always offered, even
+	 * when the endpoint doesn't list it, so picking from the list is never a
+	 * one-way door out of a hand-typed name.
+	 */
+	private renderModelOptions(models: ModelEntry[]): void {
+		const current = this.plugin.settings.model;
+		const offered = models.some((m) => m.id === current)
+			? models
+			: [{ id: current }, ...models];
+
+		this.modelEl.empty();
+		for (const model of offered) {
+			const text = model.id ? modelOptionLabel(model) : '(no model set)';
+			this.modelEl.createEl('option', { value: model.id, text });
+		}
+		this.modelEl.value = current;
 	}
 
 	/**
@@ -517,6 +579,9 @@ export class ChatView extends ItemView {
 	/** Toggle the chat UI: Send becomes Stop while an answer is in flight. */
 	private setBusy(busy: boolean): void {
 		this.busy = busy;
+		// Swapping models between the tool rounds of one message would split
+		// that answer across two of them.
+		this.modelEl.disabled = busy;
 		this.sendBtn.disabled = false;
 		this.sendBtn.setText(busy ? 'Stop' : 'Send');
 		this.sendBtn.toggleClass('va-stop', busy);
