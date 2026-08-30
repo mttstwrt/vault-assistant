@@ -5,8 +5,14 @@
  * Both numbers are measured rather than estimated. What is used is the last
  * request's `prompt_tokens` plus the answer that came back — the tokens the
  * endpoint itself counted, which together are what the next request will carry.
- * The window comes from llama.cpp's /props. An endpoint that reports neither
- * gets no ring: a guessed context bar is worse than none, because the number it
+ * The window comes from llama.cpp's /props.
+ *
+ * Knowing the window is enough to show the ring; the fill waits for the first
+ * reply, because nothing counts tokens until something is sent. It shows empty
+ * and says so rather than staying away until then: a control that appears
+ * partway through a conversation looks broken, and the window itself is worth
+ * seeing before you start. An endpoint that reports no window at all still gets
+ * no ring — a guessed context bar is worse than none, because the number it
  * shows would be believed.
  */
 
@@ -20,7 +26,10 @@ const DANGER_AT = 0.9;
 
 /** What the endpoint counted for the last exchange, and what it counted against. */
 export interface ContextUse {
-	/** Tokens in the last prompt: the conversation as the model last read it. */
+	/**
+	 * Tokens in the last prompt: the conversation as the model last read it.
+	 * Zero before there has been one, which is not the same as an empty window.
+	 */
 	promptTokens: number;
 	/** Tokens in the answer to it, which the next prompt will carry too. */
 	completionTokens: number;
@@ -73,28 +82,35 @@ export class ContextRing {
 		return this.shown;
 	}
 
-	/** Show what `use` describes, or hide the ring when there is nothing to show. */
+	/** Show what `use` describes, or hide the ring when there is no window. */
 	update(use: ContextUse | null): void {
-		if (!use || use.contextSize <= 0 || use.promptTokens <= 0) {
+		if (!use || use.contextSize <= 0) {
 			this.hide();
 			return;
 		}
 
-		const used = use.promptTokens + use.completionTokens;
+		// Nothing has been counted yet: the window is known, what fills it isn't.
+		const measured = use.promptTokens > 0;
+		const used = measured ? use.promptTokens + use.completionTokens : 0;
 		// A conversation can outgrow the window the server reported (a model
 		// swapped behind the same endpoint, a server that grew its slots); a
 		// ring past full would look broken, so it pins and the figures tell the
 		// truth underneath.
 		const ratio = Math.min(used / use.contextSize, 1);
-		const percent = Math.min(Math.round((used / use.contextSize) * 100), 100);
+		const percent = Math.min(Math.round(ratio * 100), 100);
 
 		this.fill.setAttr('stroke-dasharray', `${ratio * CIRCUMFERENCE} ${CIRCUMFERENCE}`);
-		this.el.toggleClass('va-context-warn', ratio >= WARN_AT && ratio < DANGER_AT);
-		this.el.toggleClass('va-context-danger', ratio >= DANGER_AT);
-		this.label.setText(`${percent}%`);
-		this.el.setAttr('aria-label', `Context: ${percent}% of ${compact(use.contextSize)} tokens used`);
+		this.el.toggleClass('va-context-warn', measured && ratio >= WARN_AT && ratio < DANGER_AT);
+		this.el.toggleClass('va-context-danger', measured && ratio >= DANGER_AT);
+		this.label.setText(measured ? `${percent}%` : '—');
+		this.el.setAttr(
+			'aria-label',
+			measured
+				? `Context: ${percent}% of ${compact(use.contextSize)} tokens used`
+				: `Context: ${compact(use.contextSize)} tokens, nothing counted yet`,
+		);
 
-		this.renderPopup(use, used, percent);
+		this.renderPopup(use, used, percent, measured);
 		this.el.removeClass('va-hidden');
 		this.shown = true;
 	}
@@ -105,19 +121,29 @@ export class ContextRing {
 		this.shown = false;
 	}
 
-	private renderPopup(use: ContextUse, used: number, percent: number): void {
-		const free = Math.max(use.contextSize - used, 0);
+	private renderPopup(use: ContextUse, used: number, percent: number, measured: boolean): void {
+		const model = use.model || 'this model';
 		this.popup.empty();
 		this.popup.createDiv({ cls: 'va-context-popup-title', text: 'Context window' });
+
+		if (!measured) {
+			this.popup.createDiv({ text: `${count(use.contextSize)} tokens` });
+			this.popup.createDiv({
+				cls: 'va-context-popup-note',
+				text: `The window ${model} is served with. How much of it a conversation uses is counted by the endpoint, so it fills in with the first reply.`,
+			});
+			return;
+		}
+
 		this.popup.createDiv({
 			text: `${count(used)} of ${count(use.contextSize)} tokens · ${percent}%`,
 		});
-		this.popup.createDiv({ text: `${count(free)} free` });
+		this.popup.createDiv({ text: `${count(Math.max(use.contextSize - used, 0))} free` });
 		this.popup.createDiv({
 			cls: 'va-context-popup-note',
 			text:
 				`Last exchange: ${count(use.promptTokens)} prompt + ${count(use.completionTokens)} answer, ` +
-				`counted by the endpoint for ${use.model || 'this model'}.`,
+				`counted by the endpoint for ${model}.`,
 		});
 	}
 }

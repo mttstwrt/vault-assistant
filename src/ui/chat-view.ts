@@ -668,11 +668,12 @@ export class ChatView extends ItemView {
 	private updateContextRing(): void {
 		const size = this.contextSize;
 		const stats = this.lastStats;
+		// The window alone is enough to show; the fill waits for a reply.
 		this.contextRing.update(
-			size && stats?.promptTokens
+			size
 				? {
-						promptTokens: stats.promptTokens,
-						completionTokens: stats.completionTokens ?? 0,
+						promptTokens: stats?.promptTokens ?? 0,
+						completionTokens: stats?.completionTokens ?? 0,
 						contextSize: size,
 						model: modelLabel(this.plugin.settings.model),
 					}

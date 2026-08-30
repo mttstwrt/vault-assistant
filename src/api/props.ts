@@ -73,9 +73,9 @@ export type EffortSupport =
 
 interface ServerProps {
 	chat_template?: string;
-	/** Some builds report the window at the root; others only per-slot. */
+	/** The window has moved around between llama.cpp versions; see contextSize. */
 	n_ctx?: number;
-	default_generation_settings?: { n_ctx?: number };
+	default_generation_settings?: { n_ctx?: number; params?: { n_ctx?: number } };
 }
 
 /** What one endpoint told us about the model it is serving. */
@@ -152,13 +152,18 @@ export function serverFacts(baseUrl: string, apiKey: string): Promise<ServerFact
 			// A /props without a template is a server we can't read, not a
 			// model that ignores the parameter.
 			const template = props?.chat_template;
-			const ctx = props?.n_ctx ?? props?.default_generation_settings?.n_ctx;
+			const contextSize = readContextSize(props);
+			if (contextSize === null) {
+				// The window is where the ring comes from, so a /props that
+				// answered without one is worth being able to see.
+				console.debug('[vault-assistant] No context size in /props from', url, props);
+			}
 			return {
 				effort:
 					typeof template === 'string' && template
 						? effortSupportInTemplate(template)
 						: { kind: 'unknown' },
-				contextSize: typeof ctx === 'number' && ctx > 0 ? ctx : null,
+				contextSize,
 			};
 		})
 		.catch((e: unknown): ServerFacts => {
@@ -169,6 +174,19 @@ export function serverFacts(baseUrl: string, apiKey: string): Promise<ServerFact
 
 	cache.set(url, lookup);
 	return lookup;
+}
+
+/**
+ * The context window, wherever this build of llama.cpp put it. It has been at
+ * the root, on the slot defaults, and inside their params across versions, and
+ * the per-slot figure is the one a single conversation actually gets.
+ */
+function readContextSize(props: ServerProps | null): number | null {
+	const slot = props?.default_generation_settings;
+	for (const value of [slot?.n_ctx, slot?.params?.n_ctx, props?.n_ctx]) {
+		if (typeof value === 'number' && value > 0) return value;
+	}
+	return null;
 }
 
 /** Forget what an endpoint said, so a model swap can be picked up. */
