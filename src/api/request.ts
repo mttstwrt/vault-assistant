@@ -4,7 +4,7 @@
  * ({@link ./stream}) calls decode.
  */
 import { ChatMessage, ToolCall, ToolSpec } from '../types';
-import { ReasoningEffort, VaultAssistantSettings } from '../settings';
+import { VaultAssistantSettings } from '../settings';
 
 export interface ApiToolCall {
 	id: string;
@@ -49,8 +49,6 @@ export interface LLMResult {
 export interface CallOverrides {
 	temperature?: number;
 	model?: string;
-	/** Overrides the panel's effort selector for this call. */
-	reasoningEffort?: ReasoningEffort;
 }
 
 /** Fields the extra-params passthrough may never clobber. */
@@ -122,11 +120,9 @@ export function chatRequestBody(
 	};
 	if (overrides.temperature !== undefined) body.temperature = overrides.temperature;
 
-	// Sampler and effort controls are only sent when set away from their
-	// defaults: an endpoint that rejects a parameter it doesn't know should
-	// never see one the user didn't ask for.
-	const effort = overrides.reasoningEffort ?? settings.reasoningEffort;
-	if (effort) body.reasoning_effort = effort;
+	// Sampler controls are only sent when set away from their defaults: an
+	// endpoint that rejects a parameter it doesn't know should never see one
+	// the user didn't ask for.
 	if (settings.presencePenalty !== 0) body.presence_penalty = settings.presencePenalty;
 	if (settings.repetitionPenalty !== 1) {
 		// The same sampler under two names: llama.cpp calls it repeat_penalty,

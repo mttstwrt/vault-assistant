@@ -1,38 +1,12 @@
 import { App, PluginSettingTab, Setting, TextComponent } from 'obsidian';
 import type VaultAssistantPlugin from './main';
 import { filterModels, listModels, modelLabel } from './api/models';
-import { clearEffortCache } from './api/props';
+import { clearPropsCache } from './api/props';
 import { loadWorkflows } from './workflows/schema';
 import { WORKFLOW_PRESETS } from './workflows/presets';
 
 /** The two model fields that can be filled from a discovered list. */
 type PickerKind = 'chat' | 'embed';
-
-/**
- * How hard a reasoning model should think, sent as `reasoning_effort`.
- * '' sends nothing at all, which is what endpoints that don't know the
- * parameter need. The rest are the levels llama.cpp's --reasoning-effort
- * documents; `none` turns thinking off outright.
- *
- * Which of them a given model actually understands is model-specific — Qwen3.8
- * has low/medium/xhigh and no plain high — so the chat panel narrows this list
- * to what it can detect from the endpoint (see api/props.ts).
- */
-export type ReasoningEffort =
-	| ''
-	| 'none'
-	| 'minimal'
-	| 'low'
-	| 'medium'
-	| 'high'
-	| 'xhigh'
-	| 'max';
-
-/** What each level is called in the panel's selector. */
-export function effortLabel(value: ReasoningEffort): string {
-	if (!value) return 'Effort: default';
-	return value === 'none' ? 'Effort: no thinking' : `Effort: ${value}`;
-}
 
 /**
  * One spelling per endpoint, so a trailing slash doesn't look like a different
@@ -78,8 +52,6 @@ export interface VaultAssistantSettings {
 	streamResponses: boolean;
 	/** Keep the thinking section expanded while the model reasons. */
 	expandThinking: boolean;
-	/** How hard a reasoning model should think; '' sends nothing. Set from the chat panel. */
-	reasoningEffort: ReasoningEffort;
 	/** OpenAI-style presence_penalty (-2 to 2). 0 sends nothing. */
 	presencePenalty: number;
 	/** Repetition penalty (1 = off, higher discourages repeats). 1 sends nothing. */
@@ -212,7 +184,6 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	extraBodyParams: '{\n  "dynatemp_range": 0.4,\n  "dynatemp_exponent": 1.0\n}',
 	streamResponses: true,
 	expandThinking: true,
-	reasoningEffort: '',
 	presencePenalty: 0,
 	repetitionPenalty: 1,
 	systemPrompt: DEFAULT_SYSTEM_PROMPT,
@@ -270,7 +241,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 	private save = async () => {
 		// The endpoint or model may have just changed, so anything we worked out
 		// about what it serves is no longer trustworthy.
-		clearEffortCache();
+		clearPropsCache();
 		await this.plugin.saveSettings();
 	};
 

@@ -1,75 +1,54 @@
 /**
- * Working out which reasoning-effort levels a model actually has.
+ * How much context the model has, read from llama.cpp's `GET /props`.
  *
- * There is no standard for this: OpenAI's /v1/models returns an id and little
- * else, and nothing in the OpenAI schema enumerates the values
- * `reasoning_effort` accepts. llama.cpp gets closer — GET /props (at the
- * server root, not under /v1) returns the model's whole Jinja chat template,
- * and since llama.cpp simply hands `reasoning_effort` to that template, the
- * template is the ground truth for which levels do anything at all.
+ * There is no standard for this: the OpenAI schema says nothing about a
+ * model's context window, so an endpoint that doesn't volunteer the number
+ * leaves a front end guessing. llama.cpp volunteers it —
+ * `default_generation_settings.n_ctx` is the context of one slot, which is the
+ * budget for a single request rather than the sum across `--parallel`, and so
+ * exactly what a usage indicator should measure against.
  *
- * So this reads the template and looks for the level names llama.cpp
- * documents. It is a heuristic, and it says so: anything it cannot establish
- * comes back as null and the caller offers the full list instead.
+ * Anything that can't be established comes back as null, and the panel says
+ * the size is unknown rather than showing a wrong one. An endpoint without
+ * /props is the common case, not an error.
  */
 import { requestUrl } from 'obsidian';
-import { ReasoningEffort } from '../settings';
 import { describeRequestError, directRequest, withDirectRetry } from './node-http';
 
-/**
- * Every level llama.cpp's --reasoning-effort documents, plus `none`, which its
- * server treats specially: it turns thinking off rather than reaching the
- * template.
- */
-export const EFFORT_LEVELS: ReasoningEffort[] = [
-	'none',
-	'minimal',
-	'low',
-	'medium',
-	'high',
-	'xhigh',
-	'max',
-];
-
-/** Fewer than this many hits is coincidence, not a set of levels. */
-const MIN_LEVELS = 2;
-
 interface ServerProps {
-	chat_template?: string;
+	default_generation_settings?: { n_ctx?: number };
 }
 
-/** One lookup per endpoint, shared between callers and kept for the session. */
-const cache = new Map<string, Promise<ReasoningEffort[] | null>>();
+/** One lookup per endpoint and model, shared between callers, kept for the session. */
+const cache = new Map<string, Promise<number | null>>();
 
-/** The server root: /props sits beside /v1, not inside it. */
-function propsUrl(baseUrl: string): string {
-	const base = baseUrl.trim().replace(/\/+$/, '');
-	return `${base.replace(/\/v\d+$/, '')}/props`;
+/**
+ * The /props URL for one model. Two llama.cpp details shape it:
+ *
+ * - /props sits at the server root, beside /v1, not inside it.
+ * - A router answers a bare /props for itself, with a dummy `n_ctx: 0`; the
+ *   real answer comes from `?model=`. `autoload=false` keeps that question
+ *   from loading the model to answer it, which would spend thirty seconds of
+ *   weights on "how big is the context". A single-model server ignores both.
+ */
+function propsUrl(baseUrl: string, model: string): string {
+	const root = baseUrl.trim().replace(/\/+$/, '').replace(/\/v\d+$/, '');
+	const name = model.trim();
+	const query = name ? `?model=${encodeURIComponent(name)}&autoload=false` : '';
+	return `${root}/props${query}`;
 }
 
 /**
- * The levels a chat template reacts to, or null when the template doesn't
- * mention `reasoning_effort` at all (so nothing can be concluded).
+ * The context window `model` is served with, or null whenever that can't be
+ * established — an endpoint without /props, a router speaking for itself
+ * (`n_ctx: 0`), or any failure at all.
  */
-export function effortLevelsInTemplate(template: string): ReasoningEffort[] | null {
-	if (!/reasoning_effort/i.test(template)) return null;
-	// Quoted, so Jinja's own `none` and the `max` filter don't count.
-	const found = EFFORT_LEVELS.filter((level) =>
-		new RegExp(`['"]${level}['"]`, 'i').test(template),
-	);
-	return found.length >= MIN_LEVELS ? found : null;
-}
-
-/**
- * Ask the endpoint which effort levels its model understands. Returns null
- * whenever that can't be established — a server without /props, a template
- * that ignores the parameter, or any failure at all.
- */
-export function serverEffortLevels(
+export function serverContextSize(
 	baseUrl: string,
 	apiKey: string,
-): Promise<ReasoningEffort[] | null> {
-	const url = propsUrl(baseUrl);
+	model: string,
+): Promise<number | null> {
+	const url = propsUrl(baseUrl, model);
 	const hit = cache.get(url);
 	if (hit) return hit;
 
@@ -87,11 +66,11 @@ export function serverEffortLevels(
 		.then((res) => {
 			if (res.status >= 400) return null;
 			const props = JSON.parse(res.text) as ServerProps;
-			return effortLevelsInTemplate(props?.chat_template ?? '');
+			const n = props?.default_generation_settings?.n_ctx;
+			return typeof n === 'number' && n > 0 ? n : null;
 		})
 		.catch((e: unknown) => {
-			// Endpoints that don't serve /props are the common case, not an error.
-			console.debug('[vault-assistant] No effort levels from', url, describeRequestError(e, url));
+			console.debug('[vault-assistant] No context size from', url, describeRequestError(e, url));
 			return null;
 		});
 
@@ -99,7 +78,7 @@ export function serverEffortLevels(
 	return lookup;
 }
 
-/** Forget what an endpoint said, so a model swap can be picked up. */
-export function clearEffortCache(): void {
+/** Forget what an endpoint said, so a model or endpoint swap is picked up. */
+export function clearPropsCache(): void {
 	cache.clear();
 }
