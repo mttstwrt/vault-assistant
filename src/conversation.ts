@@ -13,21 +13,50 @@ export function conversationSlug(label: string): string {
 }
 
 /**
+ * A model-suggested folder name, made safe to sit under the conversations
+ * folder. conversationSlug already drops the path separators and the characters
+ * Obsidian rejects in a name; removing dots on top of that leaves nothing that
+ * can climb out of the folder or nest inside it, so "one level deep" holds
+ * structurally rather than as a rule someone has to remember to enforce.
+ */
+function folderSlug(label: string): string {
+	return conversationSlug(label).replace(/\./g, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * The folders already in use under the conversations folder. Shown to the model
+ * when it files a new conversation, so it reuses one instead of inventing this
+ * week's synonym for a folder that already exists.
+ */
+export function conversationFolders(app: App, settings: VaultAssistantSettings): string[] {
+	const root = app.vault.getAbstractFileByPath(normalizePath(settings.conversationsFolder));
+	if (!(root instanceof TFolder)) return [];
+	return root.children
+		.filter((c): c is TFolder => c instanceof TFolder)
+		.map((f) => f.name)
+		.sort((a, b) => a.localeCompare(b));
+}
+
+/**
  * Build a file path for a new conversation: the date and time, then `label` —
- * the model's suggested title, or the first message when there isn't one. A
- * name already taken (same minute, same topic) gets a counter instead of
- * overwriting the existing transcript.
+ * the model's suggested title, or the first message when there isn't one —
+ * inside `folder` when the model filed it somewhere. Both come from the model,
+ * so both are slugged here; that makes this the one place a suggested name can
+ * become part of a path. A name already taken (same minute, same topic) gets a
+ * counter instead of overwriting the existing transcript.
  */
 export function newConversationPath(
 	app: App,
 	settings: VaultAssistantSettings,
 	label: string,
+	folder = '',
 ): string {
 	const stamp = moment().format('YYYY-MM-DD HHmm');
 	const slug = conversationSlug(label);
 	const base = slug ? `${stamp} ${slug}` : stamp;
-	const pathFor = (name: string): string =>
-		normalizePath(`${settings.conversationsFolder}/${name}.md`);
+	const dir = folderSlug(folder);
+	const parent = dir ? `${settings.conversationsFolder}/${dir}` : settings.conversationsFolder;
+	const pathFor = (name: string): string => normalizePath(`${parent}/${name}.md`);
 
 	let path = pathFor(base);
 	for (let n = 2; app.vault.getAbstractFileByPath(path) && n < 100; n++) {
