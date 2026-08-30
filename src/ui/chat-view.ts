@@ -10,6 +10,7 @@ import {
 	setIcon,
 } from 'obsidian';
 import type VaultAssistantPlugin from '../main';
+import { serverContextSize } from '../api/props';
 import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
 import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
@@ -28,6 +29,7 @@ import { suggestConversationTitle } from '../title';
 import { buildOpenFilesBlock, stripOpenFiles } from '../tools/workspace';
 import { AssistantTurn } from './assistant-turn';
 import { fitToContent } from './autogrow';
+import { ContextRing } from './context-ring';
 import {
 	addAssistantBubble,
 	addDiffPreview,
@@ -60,6 +62,7 @@ export class ChatView extends ItemView {
 	private statusEl!: HTMLElement;
 	private inputEl!: HTMLTextAreaElement;
 	private sendBtn!: HTMLButtonElement;
+	private ring!: ContextRing;
 	private toolEls = new Map<string, HTMLElement>();
 	/** Write paths the user approved for the rest of this conversation. */
 	private sessionWrites = new Set<string>();
@@ -145,6 +148,11 @@ export class ChatView extends ItemView {
 		setIcon(workflowBtn, 'telescope');
 		workflowBtn.onclick = () => this.openWorkflowModal();
 
+		// How full the model's context window is. Both numbers come from the
+		// endpoint, so an endpoint that reports neither shows an empty ring
+		// rather than a made-up one.
+		this.ring = new ContextRing(header);
+
 		this.messagesEl = root.createDiv({ cls: 'va-messages' });
 
 		// MarkdownRenderer marks [[wikilinks]] as internal links but custom views
@@ -205,6 +213,7 @@ export class ChatView extends ItemView {
 		});
 
 		this.mounted = true;
+		this.refreshContextTotal();
 		// Continue the conversation this panel was showing before it moved
 		// windows (or before Obsidian restarted); otherwise start fresh.
 		const pending = this.pendingPath;
@@ -227,6 +236,17 @@ export class ChatView extends ItemView {
 	/** True while a message or workflow run is in flight. */
 	isBusy(): boolean {
 		return this.busy;
+	}
+
+	/**
+	 * Ask the endpoint how big this model's context window is. llama.cpp
+	 * answers; most don't, and the ring says so rather than guessing.
+	 */
+	private refreshContextTotal(): void {
+		const { baseUrl, apiKey, model } = this.plugin.settings;
+		void serverContextSize(baseUrl, apiKey, model).then((total) => {
+			if (this.mounted) this.ring.setTotal(total);
+		});
 	}
 
 	/** Whether this panel is already living in its own window. */
@@ -338,6 +358,7 @@ export class ChatView extends ItemView {
 		this.sessionMcp.clear();
 		this.messagesEl.empty();
 		this.followOutput = true;
+		this.ring.reset();
 		addInfo(
 			this.messagesEl,
 			'New conversation. The agent can read and (within allowed folders) write your vault.',
@@ -361,6 +382,7 @@ export class ChatView extends ItemView {
 		this.sessionMcp.clear();
 		this.messagesEl.empty();
 		this.followOutput = true;
+		this.ring.reset();
 		addInfo(this.messagesEl, `Continuing "${file.basename}".`);
 		for (const m of messages) {
 			if (m.role === 'user') addUserBubble(this.messagesEl, m.content);
@@ -581,6 +603,7 @@ export class ChatView extends ItemView {
 					onToolResult: (call, res) => this.addToolResult(call, res),
 					onError: (msg) => this.addError(msg),
 					onFileChange: (change) => this.addFileChange(change),
+					onStats: (stats) => this.ring.report(stats),
 					requestApproval: (req) => this.requestApproval(req),
 					stream: {
 						onStart: () => {

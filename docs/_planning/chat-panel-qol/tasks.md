@@ -15,12 +15,12 @@ Approved 2026-08-30, including the loaded/unloaded marker in §3.
 
 ## QOL-2 — Context usage ring
 
-- [ ] `props.ts`: `serverContextSize` / `clearPropsCache`, `?model=…&autoload=false`
-- [ ] `request.ts`: `cache_n` on `ApiTimings`, `toStats` counts the reused prefix
-- [ ] `agent.ts`: `onStats` on `AgentEvents`, reported on both call paths
-- [ ] `ui/context-ring.ts`: the dial, thresholds, tooltip
-- [ ] `chat-view.ts`: mount it, feed it, reset it with the conversation
-- [ ] `styles.css`: `.va-ring`
+- [x] `props.ts`: `serverContextSize` / `clearPropsCache`, `?model=…&autoload=false`
+- [x] `request.ts`: `cache_n` on `ApiTimings`, `toStats` counts the reused prefix
+- [x] `agent.ts`: `onStats` on `AgentEvents`, reported on both call paths
+- [x] `ui/context-ring.ts`: the dial, thresholds, tooltip
+- [x] `chat-view.ts`: mount it, feed it, reset it with the conversation
+- [x] `styles.css`: `.va-ring`
 
 ## QOL-3 — Model selector
 

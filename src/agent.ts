@@ -29,6 +29,12 @@ export interface AgentEvents {
 	/** A file the agent wrote, so the panel can show the diff. */
 	onFileChange?: (change: FileChange) => void;
 	/**
+	 * What the endpoint reported about one model turn, streamed or buffered —
+	 * the panel measures context usage from it. Every turn of the loop reports,
+	 * so the newest is the one with the fullest history.
+	 */
+	onStats?: (stats: CallStats) => void;
+	/**
 	 * Render turns as they stream. When provided (and streaming is enabled in
 	 * settings) assistant content is reported here instead of onAssistant.
 	 */
@@ -145,6 +151,8 @@ export async function runAgent(
 			return history;
 		}
 		stream?.onDone({ stats: result.stats, aborted: !!result.aborted });
+		// onDone only fires when streaming; the panel needs the numbers either way.
+		if (result.stats) events.onStats?.(result.stats);
 
 		if (result.aborted) {
 			// Keep the partial answer as context, but drop any half-formed tool

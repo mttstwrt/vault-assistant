@@ -21,8 +21,11 @@ export interface ApiUsage {
 export interface ApiTimings {
 	predicted_n?: number;
 	predicted_per_second?: number;
+	/** Prompt tokens actually processed — the part not served from cache. */
 	prompt_n?: number;
 	prompt_per_second?: number;
+	/** Prompt tokens reused from the KV cache, which prompt_n excludes. */
+	cache_n?: number;
 }
 
 /** What the endpoint reported about a finished call, when it reports anything. */
@@ -139,6 +142,19 @@ export function chatRequestBody(
 	return body;
 }
 
+/**
+ * The whole prompt the model read, not just the part the server had to work
+ * through. `usage.prompt_tokens` already counts both; llama.cpp's timings
+ * split them, and on every turn after the first the reused prefix is nearly
+ * all of it — so `prompt_n` alone would report a few dozen tokens for a
+ * conversation of thousands. Its own docs give the sum as the context in use.
+ */
+function promptTokens(usage?: ApiUsage, timings?: ApiTimings): number | undefined {
+	if (usage?.prompt_tokens !== undefined) return usage.prompt_tokens;
+	if (timings?.prompt_n === undefined && timings?.cache_n === undefined) return undefined;
+	return (timings.prompt_n ?? 0) + (timings.cache_n ?? 0);
+}
+
 /** Normalise the usage/timings an endpoint reports into our stats shape. */
 export function toStats(
 	usage: ApiUsage | undefined,
@@ -150,7 +166,7 @@ export function toStats(
 		timings?.predicted_per_second ??
 		(completionTokens && elapsedMs > 0 ? (completionTokens * 1000) / elapsedMs : undefined);
 	return {
-		promptTokens: usage?.prompt_tokens ?? timings?.prompt_n,
+		promptTokens: promptTokens(usage, timings),
 		completionTokens,
 		tokensPerSecond: perSecond,
 		elapsedMs,

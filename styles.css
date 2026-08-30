@@ -39,6 +39,37 @@
 	color: var(--text-normal);
 }
 
+/* Context usage. Geometry and thresholds follow llama.cpp's own gauge, so the
+   two read the same; the track stays neutral while the arc takes the colour. */
+.va-ring {
+	display: inline-flex;
+	flex: 0 0 auto;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	cursor: default;
+}
+.va-ring svg {
+	width: 100%;
+	height: 100%;
+}
+.va-ring-track {
+	color: var(--text-faint);
+}
+.va-ring-arc {
+	color: var(--text-muted);
+	transition:
+		stroke-dashoffset 300ms ease,
+		color 300ms ease;
+}
+.va-ring.is-warning .va-ring-arc {
+	color: var(--text-warning, var(--color-orange));
+}
+.va-ring.is-critical .va-ring-arc {
+	color: var(--text-error);
+}
+
 .va-messages {
 	flex: 1 1 auto;
 	overflow-y: auto;
