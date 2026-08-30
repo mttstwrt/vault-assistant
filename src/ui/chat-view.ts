@@ -298,6 +298,10 @@ export class ChatView extends ItemView {
 			this.modelEl.createEl('option', { value: model.id, text });
 		}
 		this.modelEl.value = current;
+		// The header is too narrow for a long name, and the open list is where
+		// the readiness marker gets read anyway; hovering gives the whole label.
+		const chosen = offered.find((m) => m.id === current);
+		this.modelEl.setAttr('title', chosen && chosen.id ? modelOptionLabel(chosen) : 'No model set');
 	}
 
 	/**

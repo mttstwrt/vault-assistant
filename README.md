@@ -154,3 +154,13 @@ To test in a vault, copy the contents of `dist/` (`main.js`, `manifest.json`,
 `styles.css`) into `<Vault>/.obsidian/plugins/vault-assistant/` and enable the
 plugin under **Settings → Community plugins**. (For local development the plugin
 folder name should match the `id` in `manifest.json`.)
+
+**Known toolchain issue: the TypeScript version is behind.** `tsconfig.json`
+asks for `"moduleResolution": "node"` (node10). TypeScript 5.9 — what the
+lockfile pins and what CI runs — accepts it, so the build passes; TypeScript 6
+rejects it as deprecated (TS5107) *before* type-checking anything, and
+TypeScript 7 removes it. So `npx tsc` with any compiler newer than the
+lockfile's fails on the config rather than on the code, and the dependency
+cannot be bumped until this changes. `"bundler"` is the setting that matches how
+this project is actually built — esbuild resolves the imports, not tsc — and
+`"ignoreDeprecations": "6.0"` buys time. Left for its own change.

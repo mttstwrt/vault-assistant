@@ -25,12 +25,13 @@
 	color: var(--text-muted);
 }
 
-/* Takes the slack on its row, but shrinks first: a long GGUF name must never
-   be what pushes the buttons onto a second row. */
+/* Sized to the name it shows, never to the space it could take: it may shrink
+   so a long GGUF name doesn't push the buttons onto a second row, but it never
+   grows to fill the header. */
 .va-model {
-	flex: 1 1 auto;
+	flex: 0 1 auto;
 	min-width: 4em;
-	max-width: 16em;
+	max-width: 11em;
 	height: auto;
 	padding: 2px 22px 2px 6px;
 	font-size: var(--font-ui-smaller);
