@@ -160,9 +160,9 @@ export class ChatView extends ItemView {
 		this.renderModelOptions([]);
 		this.registerDomEvent(this.modelEl, 'change', () => {
 			this.plugin.settings.model = this.modelEl.value;
+			// Saving is what re-reads the header, so the ring picks up the new
+			// model's context window (see settingsChanged).
 			void this.plugin.saveSettings();
-			// A different model is a different context window.
-			this.refreshContextTotal();
 		});
 
 		// How full the model's context window is. Both numbers come from the
