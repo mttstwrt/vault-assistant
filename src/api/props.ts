@@ -147,16 +147,23 @@ export function serverFacts(baseUrl: string, apiKey: string): Promise<ServerFact
 		() => directRequest({ url, method: 'GET', headers }),
 	)
 		.then((res): ServerFacts => {
-			if (res.status >= 400) return NOTHING;
+			if (res.status >= 400) {
+				report(url, `answered ${res.status}. Only llama.cpp serves /props; on anything else the effort levels and the context ring have nothing to go on.`);
+				return NOTHING;
+			}
 			const props = JSON.parse(res.text) as ServerProps;
 			// A /props without a template is a server we can't read, not a
 			// model that ignores the parameter.
 			const template = props?.chat_template;
 			const contextSize = readContextSize(props);
 			if (contextSize === null) {
-				// The window is where the ring comes from, so a /props that
-				// answered without one is worth being able to see.
-				console.debug('[vault-assistant] No context size in /props from', url, props);
+				report(
+					url,
+					'answered, but with no context window in it, so there is no ring to draw. The response follows.',
+					props,
+				);
+			} else {
+				reportOk(url, `answered: context window ${contextSize} tokens.`);
 			}
 			return {
 				effort:
@@ -168,12 +175,29 @@ export function serverFacts(baseUrl: string, apiKey: string): Promise<ServerFact
 		})
 		.catch((e: unknown): ServerFacts => {
 			// Endpoints that don't serve /props are the common case, not an error.
-			console.debug('[vault-assistant] Nothing from', url, describeRequestError(e, url));
+			report(url, `could not be read: ${describeRequestError(e, url)}`);
 			return NOTHING;
 		});
 
 	cache.set(url, lookup);
 	return lookup;
+}
+
+/**
+ * Say what /props gave us, once per endpoint. A miss goes to warn rather than
+ * debug: debug is the console's verbose level, hidden unless asked for, and
+ * when the effort levels or the context ring do not appear this line is the
+ * whole diagnosis. A hit stays quiet at debug — nothing is wrong.
+ */
+function report(url: string, outcome: string, detail?: unknown): void {
+	const message = `[vault-assistant] ${url} ${outcome}`;
+	if (detail !== undefined) console.warn(message, detail);
+	else console.warn(message);
+}
+
+/** The same, for an endpoint that answered everything we asked. */
+function reportOk(url: string, outcome: string): void {
+	console.debug(`[vault-assistant] ${url} ${outcome}`);
 }
 
 /**
