@@ -1,38 +1,18 @@
 import { App, PluginSettingTab, Setting, TextComponent } from 'obsidian';
 import type VaultAssistantPlugin from './main';
-import { filterModels, listModels, modelLabel } from './api/models';
-import { clearEffortCache } from './api/props';
+import {
+	ModelEntry,
+	clearModelCache,
+	filterModels,
+	listModels,
+	modelOptionLabel,
+} from './api/models';
+import { clearPropsCache } from './api/props';
 import { loadWorkflows } from './workflows/schema';
 import { WORKFLOW_PRESETS } from './workflows/presets';
 
 /** The two model fields that can be filled from a discovered list. */
 type PickerKind = 'chat' | 'embed';
-
-/**
- * How hard a reasoning model should think, sent as `reasoning_effort`.
- * '' sends nothing at all, which is what endpoints that don't know the
- * parameter need. The rest are the levels llama.cpp's --reasoning-effort
- * documents; `none` turns thinking off outright.
- *
- * Which of them a given model actually understands is model-specific — Qwen3.8
- * has low/medium/xhigh and no plain high — so the chat panel narrows this list
- * to what it can detect from the endpoint (see api/props.ts).
- */
-export type ReasoningEffort =
-	| ''
-	| 'none'
-	| 'minimal'
-	| 'low'
-	| 'medium'
-	| 'high'
-	| 'xhigh'
-	| 'max';
-
-/** What each level is called in the panel's selector. */
-export function effortLabel(value: ReasoningEffort): string {
-	if (!value) return 'Effort: default';
-	return value === 'none' ? 'Effort: no thinking' : `Effort: ${value}`;
-}
 
 /**
  * One spelling per endpoint, so a trailing slash doesn't look like a different
@@ -78,8 +58,6 @@ export interface VaultAssistantSettings {
 	streamResponses: boolean;
 	/** Keep the thinking section expanded while the model reasons. */
 	expandThinking: boolean;
-	/** How hard a reasoning model should think; '' sends nothing. Set from the chat panel. */
-	reasoningEffort: ReasoningEffort;
 	/** OpenAI-style presence_penalty (-2 to 2). 0 sends nothing. */
 	presencePenalty: number;
 	/** Repetition penalty (1 = off, higher discourages repeats). 1 sends nothing. */
@@ -212,7 +190,6 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	extraBodyParams: '{\n  "dynatemp_range": 0.4,\n  "dynatemp_exponent": 1.0\n}',
 	streamResponses: true,
 	expandThinking: true,
-	reasoningEffort: '',
 	presencePenalty: 0,
 	repetitionPenalty: 1,
 	systemPrompt: DEFAULT_SYSTEM_PROMPT,
@@ -270,12 +247,13 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 	private save = async () => {
 		// The endpoint or model may have just changed, so anything we worked out
 		// about what it serves is no longer trustworthy.
-		clearEffortCache();
+		clearPropsCache();
+		clearModelCache();
 		await this.plugin.saveSettings();
 	};
 
 	/** Models each endpoint advertised, kept for as long as this tab lives. */
-	private discovered = new Map<string, string[]>();
+	private discovered = new Map<string, ModelEntry[]>();
 	/** Why an endpoint has no list to offer ('' once it has one). */
 	private discoveryState = new Map<string, string>();
 	/** Endpoints with a request in flight, so a redraw doesn't fire another. */
@@ -318,17 +296,17 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 					.addDropdown((d) => {
 						// Keep a hand-typed name selectable, so picking from the
 						// list is never a one-way door.
-						if (!models.includes(current)) {
+						if (!models.some((m) => m.id === current)) {
 							d.addOption(current, current ? `${current} (typed)` : '(not set)');
 						}
-						for (const id of models) d.addOption(id, modelLabel(id));
+						for (const m of models) d.addOption(m.id, modelOptionLabel(m));
 						d.setValue(current).onChange(async (v) => {
 							await opts.apply(v);
 							render();
 						});
 					});
 			} else if (models.length === 1) {
-				const only = models[0] ?? '';
+				const only = models[0]?.id ?? '';
 				const row = new Setting(container)
 					.setName(kind === 'chat' ? 'Available model' : 'Available embedding model')
 					.setDesc(`The endpoint serves one model: ${only}`);
@@ -360,11 +338,11 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		this.discovering.add(url);
 		this.discoveryState.set(url, 'Looking for available models…');
 		void listModels(url, key)
-			.then((ids) => {
-				this.discovered.set(url, ids);
+			.then((models) => {
+				this.discovered.set(url, models);
 				this.discoveryState.set(
 					url,
-					ids.length ? '' : 'The endpoint reported no models — type the name instead.',
+					models.length ? '' : 'The endpoint reported no models — type the name instead.',
 				);
 			})
 			.catch((e: unknown) => {
@@ -384,6 +362,9 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		const url = canonicalUrl(configured);
 		this.discovered.delete(url);
 		this.discoveryState.delete(url);
+		// The lookup is shared with the chat panel, so this has to clear there
+		// too — otherwise the refresh is served the answer it means to replace.
+		clearModelCache();
 		this.redrawPickers();
 	}
 

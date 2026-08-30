@@ -311,6 +311,11 @@ export default class VaultAssistantPlugin extends Plugin {
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
+		// An open panel shows the endpoint's model and context window in its
+		// header, either of which a settings change may have just invalidated.
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CHAT)) {
+			if (leaf.view instanceof ChatView) leaf.view.settingsChanged();
+		}
 	}
 }
 

@@ -12,7 +12,7 @@ The optional **conversation import** processes everything locally and only when 
 
 ## Features
 
-- **Chat side panel** — open from the ribbon (bot icon) or the command **Vault assistant: Open chat**. Answers **stream in** as they are written, with a collapsible **thinking** section for reasoning models that ticks while the model works and folds itself into "Thought for 4.2s" when the answer starts. **Ctrl+C** (or the Stop button, or the command **Stop the current response**) cuts a long answer off mid-sentence and keeps what you got. The composer **grows as you type** (up to 40% of the panel), all output is selectable and copyable — with a copy button on every message — and scrolling up detaches the view so you can read while the rest streams in. When the endpoint reports them, generation speed and token counts appear under the answer. An **effort selector** in the header sets how hard a reasoning model should think, sent as `reasoning_effort` (*default* sends nothing at all). Which levels a model has is model-specific — Qwen3.8 has low/medium/xhigh and no plain `high` — so the panel narrows the list to the levels it finds in the model's own chat template when the endpoint will show it (llama.cpp serves it at `/props`); otherwise it offers every level llama.cpp documents: none, minimal, low, medium, high, xhigh, max. On desktop, the pop-out button moves the panel into its own window — the open conversation follows it there, and the panel returns to whatever conversation it was showing when Obsidian restarts (auto-saved transcripts are how it travels, so with auto-save off a new window starts fresh).
+- **Chat side panel** — open from the ribbon (bot icon) or the command **Vault assistant: Open chat**. Answers **stream in** as they are written, with a collapsible **thinking** section for reasoning models that ticks while the model works and folds itself into "Thought for 4.2s" when the answer starts. **Ctrl+C** (or the Stop button, or the command **Stop the current response**) cuts a long answer off mid-sentence and keeps what you got. The composer **grows as you type** (up to 40% of the panel), all output is selectable and copyable — with a copy button on every message — and scrolling up detaches the view so you can read while the rest streams in. When the endpoint reports them, generation speed and token counts appear under the answer. A **context ring** in the header fills as the conversation grows — hover it for `12,431 / 32,768 tokens · 38% used` — and turns amber past 80%, red past 95%. Beside it, a **model dropdown** lists what your endpoint advertises and names the one that is answering; on a llama.cpp router it also says which models are loaded, since picking one that isn't means the next message waits for weights. On desktop, the pop-out button moves the panel into its own window — the open conversation follows it there, and the panel returns to whatever conversation it was showing when Obsidian restarts (auto-saved transcripts are how it travels, so with auto-save off a new window starts fresh).
 - **Vault-aware agent** — the model is given tools to explore your notes and ground its answers in them:
   - `list_files`, `read_file`, `search`
   - `semantic_search` — embedding-based recall (when semantic search is enabled)
@@ -47,7 +47,7 @@ The optional **conversation import** processes everything locally and only when 
 | --- | --- |
 | Base URL | OpenAI-compatible base, e.g. `http://localhost:11434/v1` (Ollama), `http://localhost:1234/v1` (LM Studio), `https://api.openai.com/v1`. |
 | API key | Optional. Leave empty for local models. |
-| Model | Model name your endpoint expects, e.g. `llama3.1`, `gpt-4o-mini`. Models your endpoint advertises are detected when you open these settings and offered as a dropdown when there is more than one; the refresh button next to the field looks again after you change the URL. Typing a name always works, whatever was detected. |
+| Model | Model name your endpoint expects, e.g. `llama3.1`, `gpt-4o-mini`. Models your endpoint advertises are detected when you open these settings and offered as a dropdown when there is more than one; the refresh button next to the field looks again after you change the URL. Typing a name always works, whatever was detected. The chat panel's header offers the same list, and picking there sets this. |
 | Temperature | Sampling temperature. |
 | Presence penalty | −2 to 2, 0 = off. Sent as `presence_penalty`. Discourages reusing anything already said; a small positive value helps a model that keeps circling the same phrasing. |
 | Repetition penalty | 1 = off; 1.05–1.2 is the useful range. Sent as **both** `repeat_penalty` (llama.cpp) and `repetition_penalty` (vLLM, TGI) — an endpoint ignores the name it doesn't use. The usual fix for a model that gets stuck repeating itself or thinking in circles. |
@@ -119,14 +119,20 @@ The conversations, wiki, and research folders and the memory file are always wri
 
 **A model gets stuck thinking in circles.** Small reasoning models can loop inside their own thinking and never reach an answer. Four things help, roughly in order:
 
-1. **Effort selector** in the chat panel header — drop it a level, or pick *no thinking* (`reasoning_effort: none`), which llama.cpp honours by disabling reasoning outright. Leave it on *default* to send nothing at all, which is what an endpoint that doesn't know the parameter needs.
-2. **Repetition penalty** around 1.05–1.15 in settings. A loop is repetition, and this is the sampler aimed at it.
-3. **Presence penalty** slightly positive, if the model circles the same idea in different words rather than repeating tokens exactly.
+1. **Repetition penalty** around 1.05–1.15 in settings. A loop is repetition, and this is the sampler aimed at it.
+2. **Presence penalty** slightly positive, if the model circles the same idea in different words rather than repeating tokens exactly.
+3. **`{"reasoning_effort": "none"}`** under **Send extra request parameters**, which llama.cpp honours by turning thinking off outright — or a lower level, if your model has one (see below).
 4. **Ctrl+C**, which stops the answer and keeps whatever arrived — and the thinking section shows the elapsed time, so a loop is visible while it happens rather than after.
 
 To hard-cap a runaway response, add `{"max_tokens": 2048}` under **Send extra request parameters**.
 
-**Where the effort levels come from.** No API tells a front end which effort levels a model has: OpenAI's `/v1/models` returns an id and little else, and nothing in the OpenAI schema enumerates the values `reasoning_effort` accepts. llama.cpp gets closer — `GET /props` (at the server root, beside `/v1`) returns the model's whole Jinja chat template, and since llama.cpp just hands `reasoning_effort` to that template, the template is the ground truth for which levels do anything. So the panel reads it and offers what it finds. That is a heuristic: when the template can't be read, or doesn't mention the parameter, the full documented list is offered instead and picking a level your model doesn't know is simply ignored by it.
+**The context ring says the size is unknown.** Nothing in the OpenAI schema reports a model's context window, so the ring needs an endpoint willing to volunteer it. llama.cpp does, at `GET /props` (`default_generation_settings.n_ctx`, the per-slot budget); Ollama, LM Studio and OpenAI do not, and the ring stays empty and counts tokens without a total rather than inventing one. On a llama.cpp router the question is asked per model and never loads one to answer it, so a model you have not used yet reports its window only once it is loaded.
+
+The count itself is the newest answer's prompt plus its output, which is what the whole conversation costs to send — llama.cpp gives it as `prompt_n + cache_n + predicted_n`, and the reused-from-cache part is most of it after the first turn. It moves a turn at a time, so a long prompt shows the previous figure until its answer lands, and it includes the tool results the agent pulled in while answering.
+
+**Choosing a reasoning effort is future work.** The panel used to offer a `reasoning_effort` selector, filled by reading the model's Jinja chat template from llama.cpp's `GET /props` and looking for level names inside it. That was a guess wearing a dropdown's clothes: a template can name a level in a branch that does nothing, accept one it silently ignores, or handle one it never spells out, and no endpoint says which happened. Nothing in the OpenAI schema enumerates the values `reasoning_effort` accepts, and llama.cpp hands the value to the chat template without claiming anything about it. Offering levels a model may not have is worse than offering none, so the selector is gone.
+
+Bringing it back needs an endpoint that actually advertises the levels a model accepts — something to build against and test with, rather than infer. Until then the parameter is still yours to send: `{"reasoning_effort": "low"}` under **Send extra request parameters** reaches the wire exactly as the selector did.
 
 
 **`ERR_INTERNET_DISCONNECTED` with a local model.** Obsidian is an Electron app, and Chromium refuses every network request while the operating system reports no active network interface — including requests to `127.0.0.1`, where the internet is irrelevant. A model server on the same PC should not care whether you are online, so requests to a loopback address (`localhost`, `127.0.0.1`, `::1`) that fail this way are retried over a direct connection that talks to the socket instead of going through Chromium. That covers chat, streaming, embeddings, and model discovery. It applies on desktop only; remote endpoints keep using Obsidian's own request path, with its proxy and certificate handling, and genuinely do need a network. If a local endpoint still fails after the retry, the error is about the server itself — check it is running and listening on the port in **Base URL**.
@@ -148,3 +154,13 @@ To test in a vault, copy the contents of `dist/` (`main.js`, `manifest.json`,
 `styles.css`) into `<Vault>/.obsidian/plugins/vault-assistant/` and enable the
 plugin under **Settings → Community plugins**. (For local development the plugin
 folder name should match the `id` in `manifest.json`.)
+
+**Known toolchain issue: the TypeScript version is behind.** `tsconfig.json`
+asks for `"moduleResolution": "node"` (node10). TypeScript 5.9 — what the
+lockfile pins and what CI runs — accepts it, so the build passes; TypeScript 6
+rejects it as deprecated (TS5107) *before* type-checking anything, and
+TypeScript 7 removes it. So `npx tsc` with any compiler newer than the
+lockfile's fails on the config rather than on the code, and the dependency
+cannot be bumped until this changes. `"bundler"` is the setting that matches how
+this project is actually built — esbuild resolves the imports, not tsc — and
+`"ignoreDeprecations": "6.0"` buys time. Left for its own change.

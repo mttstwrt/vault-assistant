@@ -4,7 +4,7 @@
  * ({@link ./stream}) calls decode.
  */
 import { ChatMessage, ToolCall, ToolSpec } from '../types';
-import { ReasoningEffort, VaultAssistantSettings } from '../settings';
+import { VaultAssistantSettings } from '../settings';
 
 export interface ApiToolCall {
 	id: string;
@@ -21,8 +21,11 @@ export interface ApiUsage {
 export interface ApiTimings {
 	predicted_n?: number;
 	predicted_per_second?: number;
+	/** Prompt tokens actually processed — the part not served from cache. */
 	prompt_n?: number;
 	prompt_per_second?: number;
+	/** Prompt tokens reused from the KV cache, which prompt_n excludes. */
+	cache_n?: number;
 }
 
 /** What the endpoint reported about a finished call, when it reports anything. */
@@ -49,8 +52,6 @@ export interface LLMResult {
 export interface CallOverrides {
 	temperature?: number;
 	model?: string;
-	/** Overrides the panel's effort selector for this call. */
-	reasoningEffort?: ReasoningEffort;
 }
 
 /** Fields the extra-params passthrough may never clobber. */
@@ -122,11 +123,9 @@ export function chatRequestBody(
 	};
 	if (overrides.temperature !== undefined) body.temperature = overrides.temperature;
 
-	// Sampler and effort controls are only sent when set away from their
-	// defaults: an endpoint that rejects a parameter it doesn't know should
-	// never see one the user didn't ask for.
-	const effort = overrides.reasoningEffort ?? settings.reasoningEffort;
-	if (effort) body.reasoning_effort = effort;
+	// Sampler controls are only sent when set away from their defaults: an
+	// endpoint that rejects a parameter it doesn't know should never see one
+	// the user didn't ask for.
 	if (settings.presencePenalty !== 0) body.presence_penalty = settings.presencePenalty;
 	if (settings.repetitionPenalty !== 1) {
 		// The same sampler under two names: llama.cpp calls it repeat_penalty,
@@ -143,6 +142,19 @@ export function chatRequestBody(
 	return body;
 }
 
+/**
+ * The whole prompt the model read, not just the part the server had to work
+ * through. `usage.prompt_tokens` already counts both; llama.cpp's timings
+ * split them, and on every turn after the first the reused prefix is nearly
+ * all of it — so `prompt_n` alone would report a few dozen tokens for a
+ * conversation of thousands. Its own docs give the sum as the context in use.
+ */
+function promptTokens(usage?: ApiUsage, timings?: ApiTimings): number | undefined {
+	if (usage?.prompt_tokens !== undefined) return usage.prompt_tokens;
+	if (timings?.prompt_n === undefined && timings?.cache_n === undefined) return undefined;
+	return (timings.prompt_n ?? 0) + (timings.cache_n ?? 0);
+}
+
 /** Normalise the usage/timings an endpoint reports into our stats shape. */
 export function toStats(
 	usage: ApiUsage | undefined,
@@ -154,7 +166,7 @@ export function toStats(
 		timings?.predicted_per_second ??
 		(completionTokens && elapsedMs > 0 ? (completionTokens * 1000) / elapsedMs : undefined);
 	return {
-		promptTokens: usage?.prompt_tokens ?? timings?.prompt_n,
+		promptTokens: promptTokens(usage, timings),
 		completionTokens,
 		tokensPerSecond: perSecond,
 		elapsedMs,

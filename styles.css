@@ -25,12 +25,17 @@
 	color: var(--text-muted);
 }
 
-.va-effort {
+/* Sized to the name it shows, never to the space it could take: it may shrink
+   so a long GGUF name doesn't push the buttons onto a second row, but it never
+   grows to fill the header. */
+.va-model {
 	flex: 0 1 auto;
+	min-width: 4em;
 	max-width: 11em;
 	height: auto;
 	padding: 2px 22px 2px 6px;
 	font-size: var(--font-ui-smaller);
+	text-overflow: ellipsis;
 }
 
 .va-new {
@@ -45,6 +50,40 @@
 }
 .va-new:hover {
 	color: var(--text-normal);
+}
+
+/* Context usage. Geometry and thresholds follow llama.cpp's own gauge, so the
+   two read the same; the track stays neutral while the arc takes the colour. */
+.va-ring {
+	display: inline-flex;
+	flex: 0 0 auto;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	cursor: default;
+}
+.va-ring svg {
+	width: 100%;
+	height: 100%;
+}
+.va-ring-track {
+	/* Visible enough to read as a ring when empty, quiet enough to stay
+	   behind the arc when it isn't. */
+	color: var(--text-muted);
+	stroke-opacity: 0.25;
+}
+.va-ring-arc {
+	color: var(--text-muted);
+	transition:
+		stroke-dashoffset 300ms ease,
+		color 300ms ease;
+}
+.va-ring.is-warning .va-ring-arc {
+	color: var(--text-warning, var(--color-orange));
+}
+.va-ring.is-critical .va-ring-arc {
+	color: var(--text-error);
 }
 
 .va-messages {

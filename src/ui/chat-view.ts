@@ -10,8 +10,8 @@ import {
 	setIcon,
 } from 'obsidian';
 import type VaultAssistantPlugin from '../main';
-import { ReasoningEffort, effortLabel } from '../settings';
-import { EFFORT_LEVELS, serverEffortLevels } from '../api/props';
+import { serverContextSize } from '../api/props';
+import { ModelEntry, filterModels, listModels, modelOptionLabel } from '../api/models';
 import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
 import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
@@ -30,6 +30,7 @@ import { suggestConversationTitle } from '../title';
 import { buildOpenFilesBlock, stripOpenFiles } from '../tools/workspace';
 import { AssistantTurn } from './assistant-turn';
 import { fitToContent } from './autogrow';
+import { ContextRing } from './context-ring';
 import {
 	addAssistantBubble,
 	addDiffPreview,
@@ -61,8 +62,9 @@ export class ChatView extends ItemView {
 	private messagesEl!: HTMLElement;
 	private statusEl!: HTMLElement;
 	private inputEl!: HTMLTextAreaElement;
-	private effortEl!: HTMLSelectElement;
 	private sendBtn!: HTMLButtonElement;
+	private modelEl!: HTMLSelectElement;
+	private ring!: ContextRing;
 	private toolEls = new Map<string, HTMLElement>();
 	/** Write paths the user approved for the rest of this conversation. */
 	private sessionWrites = new Set<string>();
@@ -148,27 +150,25 @@ export class ChatView extends ItemView {
 		setIcon(workflowBtn, 'telescope');
 		workflowBtn.onclick = () => this.openWorkflowModal();
 
-		// How hard the model should think. "Default" sends nothing, so endpoints
-		// that don't know reasoning_effort never see it.
-		this.effortEl = header.createEl('select', {
-			cls: 'dropdown va-effort',
-			attr: {
-				'aria-label': 'Reasoning effort',
-				title: 'How hard a reasoning model should think (sent as reasoning_effort). Lower it when a model gets stuck thinking.',
-			},
+		// Which model is answering, and what else this endpoint serves. The
+		// panel and the settings tab share one field, so choosing here is the
+		// same act as choosing there.
+		this.modelEl = header.createEl('select', {
+			cls: 'dropdown va-model',
+			attr: { 'aria-label': 'Model' },
 		});
-		this.renderEffortOptions(EFFORT_LEVELS);
-		this.registerDomEvent(this.effortEl, 'change', () => {
-			this.plugin.settings.reasoningEffort = this.effortEl.value as ReasoningEffort;
+		this.renderModelOptions([]);
+		this.registerDomEvent(this.modelEl, 'change', () => {
+			this.plugin.settings.model = this.modelEl.value;
+			// Saving is what re-reads the header, so the ring picks up the new
+			// model's context window (see settingsChanged).
 			void this.plugin.saveSettings();
 		});
-		// Narrow the list to what this model actually understands, if the
-		// endpoint is willing to say (llama.cpp is; most aren't).
-		void serverEffortLevels(this.plugin.settings.baseUrl, this.plugin.settings.apiKey).then(
-			(levels) => {
-				if (levels && this.mounted) this.renderEffortOptions(levels);
-			},
-		);
+
+		// How full the model's context window is. Both numbers come from the
+		// endpoint, so an endpoint that reports neither shows an empty ring
+		// rather than a made-up one.
+		this.ring = new ContextRing(header);
 
 		this.messagesEl = root.createDiv({ cls: 'va-messages' });
 
@@ -230,6 +230,8 @@ export class ChatView extends ItemView {
 		});
 
 		this.mounted = true;
+		this.refreshContextTotal();
+		this.loadModelOptions();
 		// Continue the conversation this panel was showing before it moved
 		// windows (or before Obsidian restarted); otherwise start fresh.
 		const pending = this.pendingPath;
@@ -255,21 +257,62 @@ export class ChatView extends ItemView {
 	}
 
 	/**
-	 * Fill the effort selector. `levels` is the model's own set when the
-	 * endpoint could tell us, otherwise every level llama.cpp documents. The
-	 * saved choice is always offered, even when it isn't in the list, so a model
-	 * swap can't silently change what gets sent.
+	 * The endpoint or the model may have been changed in settings while this
+	 * panel was open; the header shows both, so it re-reads both.
 	 */
-	private renderEffortOptions(levels: ReasoningEffort[]): void {
-		const chosen = this.plugin.settings.reasoningEffort;
-		const values: ReasoningEffort[] = ['', ...levels];
-		if (chosen && !values.includes(chosen)) values.push(chosen);
+	settingsChanged(): void {
+		if (!this.mounted) return;
+		this.refreshContextTotal();
+		this.loadModelOptions();
+	}
 
-		this.effortEl.empty();
-		for (const value of values) {
-			this.effortEl.createEl('option', { value, text: effortLabel(value) });
+	/** Offer the models this endpoint advertises. Failure leaves the current one. */
+	private loadModelOptions(): void {
+		const { baseUrl, apiKey } = this.plugin.settings;
+		void listModels(baseUrl, apiKey)
+			.then((models) => {
+				if (this.mounted) this.renderModelOptions(filterModels(models, 'chat'));
+			})
+			.catch((e: unknown) => {
+				// The settings tab is where a discovery failure gets explained;
+				// the header just keeps showing the configured model.
+				console.debug('[vault-assistant] No model list for the panel:', e);
+				if (this.mounted) this.renderModelOptions([]);
+			});
+	}
+
+	/**
+	 * Fill the model selector. The configured model is always offered, even
+	 * when the endpoint doesn't list it, so picking from the list is never a
+	 * one-way door out of a hand-typed name.
+	 */
+	private renderModelOptions(models: ModelEntry[]): void {
+		const current = this.plugin.settings.model;
+		const offered = models.some((m) => m.id === current)
+			? models
+			: [{ id: current }, ...models];
+
+		this.modelEl.empty();
+		for (const model of offered) {
+			const text = model.id ? modelOptionLabel(model) : '(no model set)';
+			this.modelEl.createEl('option', { value: model.id, text });
 		}
-		this.effortEl.value = chosen;
+		this.modelEl.value = current;
+		// The header is too narrow for a long name, and the open list is where
+		// the readiness marker gets read anyway; hovering gives the whole label.
+		const chosen = offered.find((m) => m.id === current);
+		this.modelEl.setAttr('title', chosen && chosen.id ? modelOptionLabel(chosen) : 'No model set');
+	}
+
+	/**
+	 * Ask the endpoint how big this model's context window is. llama.cpp
+	 * answers; most don't, and the ring says so rather than guessing.
+	 */
+	private refreshContextTotal(): void {
+		const { baseUrl, apiKey, model } = this.plugin.settings;
+		void serverContextSize(baseUrl, apiKey, model).then((total) => {
+			if (this.mounted) this.ring.setTotal(total);
+		});
 	}
 
 	/** Whether this panel is already living in its own window. */
@@ -381,6 +424,7 @@ export class ChatView extends ItemView {
 		this.sessionMcp.clear();
 		this.messagesEl.empty();
 		this.followOutput = true;
+		this.ring.reset();
 		addInfo(
 			this.messagesEl,
 			'New conversation. The agent can read and (within allowed folders) write your vault.',
@@ -404,6 +448,7 @@ export class ChatView extends ItemView {
 		this.sessionMcp.clear();
 		this.messagesEl.empty();
 		this.followOutput = true;
+		this.ring.reset();
 		addInfo(this.messagesEl, `Continuing "${file.basename}".`);
 		for (const m of messages) {
 			if (m.role === 'user') addUserBubble(this.messagesEl, m.content);
@@ -538,6 +583,9 @@ export class ChatView extends ItemView {
 	/** Toggle the chat UI: Send becomes Stop while an answer is in flight. */
 	private setBusy(busy: boolean): void {
 		this.busy = busy;
+		// Swapping models between the tool rounds of one message would split
+		// that answer across two of them.
+		this.modelEl.disabled = busy;
 		this.sendBtn.disabled = false;
 		this.sendBtn.setText(busy ? 'Stop' : 'Send');
 		this.sendBtn.toggleClass('va-stop', busy);
@@ -624,6 +672,7 @@ export class ChatView extends ItemView {
 					onToolResult: (call, res) => this.addToolResult(call, res),
 					onError: (msg) => this.addError(msg),
 					onFileChange: (change) => this.addFileChange(change),
+					onStats: (stats) => this.ring.report(stats),
 					requestApproval: (req) => this.requestApproval(req),
 					stream: {
 						onStart: () => {
