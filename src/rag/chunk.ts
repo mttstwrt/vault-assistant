@@ -1,3 +1,5 @@
+import { makeFenceTracker } from '../wikilinks';
+
 /** One embeddable piece of a note: where it came from and its text. */
 export interface Chunk {
 	path: string;
@@ -82,7 +84,12 @@ export function chunkConversation(path: string, text: string): Chunk[] {
 	const turns: Turn[] = [];
 	let current: Turn | null = null;
 
+	// Text the wikilink expander attached to a message is a copy of a note that
+	// is already indexed under its own path, so embedding it here would return
+	// the same passage twice under two names. Skipped whole.
+	const fenced = makeFenceTracker();
 	for (const line of text.split('\n')) {
+		if (fenced(line)) continue;
 		if (/^## 🧑 You\s*$/.test(line)) {
 			current = { role: 'user', lines: [] };
 			turns.push(current);

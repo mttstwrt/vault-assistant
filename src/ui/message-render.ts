@@ -58,6 +58,17 @@ export function addUserBubble(parent: HTMLElement, text: string): HTMLElement {
 	return bubble;
 }
 
+/**
+ * What the [[link]] expander attached to a message, under the bubble that sent
+ * it. Pulling a note into a message without showing it would be the plugin
+ * quietly sending vault contents the user did not watch it send.
+ */
+export function addInlinedNote(bubble: HTMLElement, lines: string[]): void {
+	if (!lines.length) return;
+	const note = bubble.createDiv({ cls: 'va-inlined' });
+	for (const line of lines) note.createDiv({ text: `↘ ${line}` });
+}
+
 /** A finished assistant message, rendered as markdown (saved transcripts, non-streamed turns). */
 export async function addAssistantBubble(
 	app: App,

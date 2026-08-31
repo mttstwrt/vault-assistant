@@ -27,6 +27,7 @@ import { ImportModal } from './import-modal';
 import { WorkflowModal, WorkflowStart } from './workflow-modal';
 import { WorkflowRun, createRunNote } from '../workflows/runner';
 import { prepareContext, stripPrePass } from '../prepass';
+import { Expansion, expandWikilinks } from '../wikilinks';
 import { Filing, suggestFiling } from '../filing';
 import { buildOpenFilesBlock, stripOpenFiles } from '../tools/workspace';
 import { AssistantTurn } from './assistant-turn';
@@ -43,6 +44,7 @@ import {
 	addUserBubble,
 	markPreviewApplied,
 	prettyJson,
+	addInlinedNote,
 } from './message-render';
 
 export const VIEW_TYPE_CHAT = 'vault-assistant-view';
@@ -51,6 +53,32 @@ const PLACEHOLDER = 'Ask about your vault…  (Enter to send, Shift+Enter for ne
 
 /** How close to the bottom still counts as "following the output", in pixels. */
 const FOLLOW_SLACK = 32;
+
+/** The `↘ …` lines under a user bubble: what was attached, and what was not. */
+function describeExpansion(e: Expansion): string[] {
+	const lines: string[] = [];
+	if (e.inlined.length) {
+		const chars = e.inlined.reduce((n, i) => n + i.chars, 0);
+		const names = e.inlined.map((i) => `${i.path}${i.link.includes('#') ? `#${i.link.split('#')[1] ?? ''}` : ''}`);
+		lines.push(`inlined ${names.join(' · ')} (${(chars / 1000).toFixed(1)}k)`);
+	}
+	for (const m of e.missed) {
+		lines.push(
+			m.near
+				? `[[${m.link}]] matched no note — did you mean ${m.near}?`
+				: `[[${m.link}]] matched no note`,
+		);
+	}
+	if (e.blocked.length) {
+		lines.push(
+			e.blocked.length === 1
+				? '1 link is in a blocked folder — not attached'
+				: `${e.blocked.length} links are in blocked folders — not attached`,
+		);
+	}
+	if (e.deferred.length) lines.push(`${e.deferred.length} more linked, not attached (message budget)`);
+	return lines;
+}
 
 export class ChatView extends ItemView {
 	private plugin: VaultAssistantPlugin;
@@ -678,8 +706,19 @@ export class ChatView extends ItemView {
 
 		this.inputEl.value = '';
 		fitToContent(this.inputEl);
-		this.history.push({ role: 'user', content: text });
-		addUserBubble(this.messagesEl, text);
+
+		// A [[link]] the user typed is an unambiguous "this note, please", so it
+		// is resolved here and attached to the message rather than costing the
+		// agent a tool round. It goes into history, not the system prompt: the
+		// note is still the subject several turns later, and a reopened
+		// transcript has to give the model the context it had the first time.
+		const expansion = this.plugin.settings.expandTypedLinks
+			? await expandWikilinks(this.app, this.plugin.settings, text, this.linkSourcePath())
+			: null;
+
+		this.history.push({ role: 'user', content: text + (expansion?.block ?? '') });
+		const bubble = addUserBubble(this.messagesEl, text);
+		if (expansion) addInlinedNote(bubble, describeExpansion(expansion));
 		this.scrollToBottom(true);
 
 		const abort = new AbortController();
@@ -762,6 +801,17 @@ export class ChatView extends ItemView {
 		this.abort = null;
 		this.setStatus(null);
 		this.setBusy(false);
+	}
+
+	/**
+	 * The note a typed [[link]] resolves against, so it lands where it would if
+	 * written in the note the user is looking at. Empty when "See what you have
+	 * open" is off: that setting means the panel does not use what is open, and
+	 * quietly using it for link resolution would route around it.
+	 */
+	private linkSourcePath(): string {
+		if (!this.plugin.settings.useOpenFiles) return '';
+		return this.app.workspace.getActiveFile()?.path ?? '';
 	}
 
 	/** The message that opened this conversation — what names and files it. */
