@@ -16,74 +16,74 @@ forced a bump, `Vault.copy` at 1.8.7, belongs to a non-goal.
 
 ## 1. Search, listing, path resolution
 
-- [ ] `src/tools/search.ts`: the scan, with regex/whole-word/invert/context/
+- [x] `src/tools/search.ts`: the scan, with regex/whole-word/invert/context/
       multiline/files-only/scope, `path:line:` output, 200-char pattern cap and a
       compile that reports rather than throws.
-- [ ] `src/tools/vault-tools.ts`: `search` spec rewritten; body delegates.
-- [ ] `src/prepass.ts`: `literalSearch` deleted, calls the shared scan.
-- [ ] `list_files` gains `depth` (default 1, max 4, 500-entry cap).
-- [ ] `src/tools/paths.ts`: `getFirstLinkpathDest` tried before the hand-rolled
+- [x] `src/tools/vault-tools.ts`: `search` spec rewritten; body delegates.
+- [x] `src/prepass.ts`: `literalSearch` deleted, calls the shared scan.
+- [x] `list_files` gains `depth` (default 1, max 4, 500-entry cap).
+- [x] `src/tools/paths.ts`: `getFirstLinkpathDest` tried before the hand-rolled
       basename scan, so aliases and bare filenames resolve Obsidian's way.
 
 ## 2. Sections, tags, atomic writes
 
-- [ ] `src/tools/sections.ts`: `sectionRange` over `resolveSubpath`; `outline`,
+- [x] `src/tools/sections.ts`: `sectionRange` over `resolveSubpath`; `outline`,
       `read_section`, `write_section`. Heading accepted as `heading` or as a
       `path#heading` suffix. Not-found names the headings that exist.
-- [ ] `src/tools/tags.ts`: `tags`, over `getAllTags`, hierarchy-aware.
-- [ ] `Vault.process` for `append_file`, `remember` (append) and `update_wiki`
+- [x] `src/tools/tags.ts`: `tags`, over `getAllTags`, hierarchy-aware.
+- [x] `Vault.process` for `append_file`, `remember` (append) and `update_wiki`
       (append) — the read-then-write race, fixed.
-- [ ] Specs + dispatch for the four new tools.
+- [x] Specs + dispatch for the four new tools.
 
 ## 3. Structure: folders and moves
 
-- [ ] `src/tools/files.ts`: the one `ensureFolder` (copies in `conversation.ts`
+- [x] `src/tools/files.ts`: the one `ensureFolder` (copies in `conversation.ts`
       and `vault-tools.ts` deleted), `createFolder`, `moveFile`.
-- [ ] `src/types.ts`: `ApprovalRequest.kind` gains `'move' | 'create-folder'`,
+- [x] `src/types.ts`: `ApprovalRequest.kind` gains `'move' | 'create-folder'`,
       plus `toPath`.
-- [ ] `src/ui/chat-view.ts`: card branches for both; `always-file` suppressed on
+- [x] `src/ui/chat-view.ts`: card branches for both; `always-file` suppressed on
       a folder create.
-- [ ] `move_file`: destination rule (existing folder → move into it), both-ends
+- [x] `move_file`: destination rule (existing folder → move into it), both-ends
       permission, folder-with-unreadable-children refused, backlink count before
       and after with a 3s `metadataCache.on('resolved')` wait.
-- [ ] `src/tools/graph.ts`: export `buildBacklinks`.
-- [ ] `src/ui/chat-view.ts`: follow `vault.on('rename')` so a moved transcript
+- [x] `src/tools/graph.ts`: export `buildBacklinks`.
+- [x] `src/ui/chat-view.ts`: follow `vault.on('rename')` so a moved transcript
       does not resurrect its old path.
 
 ## 4. Aliases
 
-- [ ] `src/tools/aliases.ts`: move/rename/mkdir names out of `UNSUPPORTED` into
+- [x] `src/tools/aliases.ts`: move/rename/mkdir names out of `UNSUPPORTED` into
       redirects; `UNSUPPORTED` narrowed to delete and copy and its message
       corrected; `head`/`tail`/`tree`/`find` read aliases; `to`/`heading`
       argument aliases.
 
 ## 5. Capabilities
 
-- [ ] `src/tools/capabilities.ts`: the five-part report from `offered`, the
+- [x] `src/tools/capabilities.ts`: the five-part report from `offered`, the
       permission helpers, and `alwaysUpdateLinks` read from
       `<configDir>/app.json` with an honest fallback.
-- [ ] `src/prompts.ts`: the one line telling the model to call it.
+- [x] `src/prompts.ts`: the one line telling the model to call it.
 
 ## 6. Typed links
 
-- [ ] `src/wikilinks.ts`: parse (skipping code fences), resolve, slice, budget,
+- [x] `src/wikilinks.ts`: parse (skipping code fences), resolve, slice, budget,
       dedupe; near-miss naming for a link that matches nothing.
-- [ ] `src/ui/chat-view.ts`: expand in `send()` into the user turn; the
+- [x] `src/ui/chat-view.ts`: expand in `send()` into the user turn; the
       `↘ inlined …` line under the bubble.
-- [ ] `src/conversation.ts` + `src/rag/chunk.ts`: shared fence tracking, so an
+- [x] `src/conversation.ts` + `src/rag/chunk.ts`: shared fence tracking, so an
       inlined transcript cannot split a turn and inlined text is not embedded.
-- [ ] `src/settings.ts`: `expandTypedLinks` (default true) and its row.
+- [x] `src/settings.ts`: `expandTypedLinks` (default true) and its row.
 
 ## 7. Docs and checks
 
-- [ ] `README.md`: tool list, feature bullets, the inliner's settings row, the
+- [x] `README.md`: tool list, feature bullets, the inliner's settings row, the
       privacy paragraph.
-- [ ] `AGENTS.md`: the egress paragraph gains the inliner.
-- [ ] `docs/future-work.md`: link autocomplete in the composer (what it would
+- [x] `AGENTS.md`: the egress paragraph gains the inliner.
+- [x] `docs/future-work.md`: link autocomplete in the composer (what it would
       take), and model tool-calling capability vs. the token cost of the tool
       block.
-- [ ] `npm run lint`, `npm run build`.
-- [ ] Probe the untrusted/fragile paths outside Obsidian against stubs: the
+- [x] `npm run lint`, `npm run build`.
+- [x] Probe the untrusted/fragile paths outside Obsidian against stubs: the
       wikilink parser, the section slicer, the regex search, and the move
       destination rule.
 - [ ] **Acceptance run (requirements §4) — needs Obsidian and an endpoint.**
