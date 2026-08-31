@@ -450,6 +450,28 @@
 	width: 100%;
 }
 
+/* Settings rows holding a long value — an endpoint URL, a vault path, a model
+   name like text-embedding-nomic-embed-text-v1.5 — give it the whole row
+   instead of the corner a Setting's control column leaves it. Only marked rows
+   stack: a full-width box for a temperature of 0.7 reads as a mistake, so the
+   numeric rows and every toggle keep the compact layout. */
+.va-setting-wide {
+	display: block;
+}
+.va-setting-wide .setting-item-control {
+	justify-content: flex-start;
+	width: 100%;
+	padding-top: 6px;
+}
+/* flex, not width alone: two of these rows pair the input with a button (the
+   refresh-models one), which should sit beside it rather than be pushed off. */
+.va-setting-wide .setting-item-control input,
+.va-setting-wide .setting-item-control textarea {
+	flex: 1 1 auto;
+	width: 100%;
+	min-width: 0;
+}
+
 .va-settings-error:not(:empty) {
 	color: var(--text-error);
 	font-size: var(--font-ui-smaller);

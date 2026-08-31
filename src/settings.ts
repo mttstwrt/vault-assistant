@@ -82,6 +82,8 @@ export interface VaultAssistantSettings {
 	autoSaveConversations: boolean;
 	/** Let the model title each saved conversation (one extra cheap call per chat). */
 	nameConversations: boolean;
+	/** Let the model file each saved conversation into a folder (shares that call). */
+	fileConversations: boolean;
 
 	// --- Operating memory ---
 	useMemory: boolean;
@@ -201,6 +203,7 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	wikiFolder: 'AI/Wiki',
 	autoSaveConversations: true,
 	nameConversations: true,
+	fileConversations: false,
 	useMemory: true,
 	memoryFile: 'AI/Memory.md',
 	wikiHomeNote: 'Home',
@@ -384,6 +387,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Base URL')
+			.setClass('va-setting-wide')
 			.setDesc(
 				'OpenAI-compatible base URL. Examples: http://localhost:11434/v1 (Ollama), http://localhost:1234/v1 (LM Studio), https://api.openai.com/v1.',
 			)
@@ -399,6 +403,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('API key')
+			.setClass('va-setting-wide')
 			.setDesc('Optional. Leave empty for local models that do not need one.')
 			.addText((t) => {
 				t.inputEl.type = 'password';
@@ -413,6 +418,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		let modelText: TextComponent | null = null;
 		new Setting(containerEl)
 			.setName('Model')
+			.setClass('va-setting-wide')
 			.setDesc('Model name as your endpoint expects it. Detected models are offered below.')
 			.addText((t) => {
 				modelText = t;
@@ -552,6 +558,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 			const paramsErr = containerEl.createDiv({ cls: 'va-settings-error' });
 			new Setting(containerEl)
 				.setName('Extra parameters (JSON object)')
+				.setClass('va-setting-wide')
 				.setDesc(
 					'Sent as top-level request-body fields. Cannot override model, messages, or tools.',
 				)
@@ -582,6 +589,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Blocked folders (reads)')
+			.setClass('va-setting-wide')
 			.setDesc(
 				'One folder per line. The agent can read your whole vault except these. Blocked notes are hidden from it entirely — not listed, not searchable, and invisible to reads. e.g. "Private", "Journal".',
 			)
@@ -595,6 +603,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Writable folders')
+			.setClass('va-setting-wide')
 			.setDesc(
 				'One folder per line. The agent may write freely inside these (the conversations and wiki folders are always writable). Writing anywhere else pauses and asks you for approval. Leave empty to be asked before every write outside the AI folders.',
 			)
@@ -608,6 +617,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Conversations folder')
+			.setClass('va-setting-wide')
 			.setDesc('Where chat transcripts are saved. Always writable.')
 			.addText((t) =>
 				t
@@ -621,6 +631,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Wiki folder')
+			.setClass('va-setting-wide')
 			.setDesc('Where the generated, interlinked wiki lives. Always writable.')
 			.addText((t) =>
 				t
@@ -634,28 +645,42 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Auto-save conversations')
-			.setDesc('Save each conversation to the conversations folder as you chat.')
+			.setDesc(
+				'Save each conversation to the conversations folder as you chat. With this off, the save button in the chat panel writes the conversation you are in; from then on that one keeps saving as it grows.',
+			)
 			.addToggle((t) =>
 				t.setValue(s.autoSaveConversations).onChange(async (v) => {
 					s.autoSaveConversations = v;
 					await this.save();
-					this.display();
 				}),
 			);
 
-		if (s.autoSaveConversations) {
-			new Setting(containerEl)
-				.setName('Let the model name conversations')
-				.setDesc(
-					'After the first exchange, make one cheap model call to title the conversation, and save it as "2026-08-12 1432 Reworking the RAG chunker". Turn this off to name files after your first message instead, with no extra call.',
-				)
-				.addToggle((t) =>
-					t.setValue(s.nameConversations).onChange(async (v) => {
-						s.nameConversations = v;
-						await this.save();
-					}),
-				);
-		}
+		// Naming and filing apply to any save, by the panel's save button as much
+		// as by auto-save, so neither is nested under the auto-save toggle — that
+		// would hide them from exactly the person who turned auto-save off.
+		new Setting(containerEl)
+			.setName('Let the model name conversations')
+			.setDesc(
+				'The first time a conversation is saved, make one cheap model call to title it, and save it as "2026-08-12 1432 Reworking the RAG chunker". Turn this off to name files after your first message instead, with no extra call.',
+			)
+			.addToggle((t) =>
+				t.setValue(s.nameConversations).onChange(async (v) => {
+					s.nameConversations = v;
+					await this.save();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('Let the model file conversations into folders')
+			.setDesc(
+				'Also ask which folder inside your conversations folder the transcript belongs in, and create that folder if it does not exist yet — so the folder sorts by subject instead of only by date. Folders you already have are offered to the model first, so a vocabulary settles instead of drifting into "Coding", "Programming" and "Dev". This shares the naming call above when that is on, and costs one cheap call of its own when it is off. Conversations are filed once, when first saved, and never moved afterwards.',
+			)
+			.addToggle((t) =>
+				t.setValue(s.fileConversations).onChange(async (v) => {
+					s.fileConversations = v;
+					await this.save();
+				}),
+			);
 
 		new Setting(containerEl)
 			.setName('See what you have open')
@@ -687,6 +712,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		if (s.useMemory) {
 			new Setting(containerEl)
 				.setName('Memory file')
+				.setClass('va-setting-wide')
 				.setDesc(
 					'Path to the operating-memory note. Always readable and writable. Loaded in full each session, so keep it concise.',
 				)
@@ -705,6 +731,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Home page title')
+			.setClass('va-setting-wide')
 			.setDesc(
 				'Title of the curated entry page inside the wiki folder — the table of contents the agent starts from and links new pages into.',
 			)
@@ -734,6 +761,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Runs folder')
+			.setClass('va-setting-wide')
 			.setDesc(
 				'Where workflow-run notes (the goal plus each round’s report) are saved. Always writable.',
 			)
@@ -749,6 +777,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Workflows folder')
+			.setClass('va-setting-wide')
 			.setDesc(
 				'Where workflow definition notes live. Notes here (with "steps" in frontmatter) appear in the workflow picker alongside the built-in presets. Always writable.',
 			)
@@ -790,6 +819,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Goals note')
+			.setClass('va-setting-wide')
 			.setDesc(
 				'The note workflows reference via {{goalsFile}} — the life coach reads it to know what you are working toward. Always readable and writable.',
 			)
@@ -846,6 +876,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 			new Setting(containerEl)
 				.setName('Goal for scheduled runs')
+				.setClass('va-setting-wide')
 				.setDesc('Used when a scheduled run starts a fresh run note. {{goalsFile}} expands to your goals note path.')
 				.addTextArea((t) => {
 					t.inputEl.rows = 3;
@@ -883,6 +914,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 			let embedText: TextComponent | null = null;
 			new Setting(containerEl)
 				.setName('Embedding model')
+				.setClass('va-setting-wide')
 				.setDesc('e.g. nomic-embed-text (Ollama) or text-embedding-3-small (OpenAI).')
 				.addText((t) => {
 					embedText = t;
@@ -915,6 +947,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 			new Setting(containerEl)
 				.setName('Embedding base URL')
+				.setClass('va-setting-wide')
 				.setDesc('Optional. Leave empty to use the chat base URL.')
 				.addText((t) =>
 					t
@@ -928,6 +961,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 			new Setting(containerEl)
 				.setName('Embedding API key')
+				.setClass('va-setting-wide')
 				.setDesc('Optional. Leave empty to use the chat API key.')
 				.addText((t) => {
 					t.inputEl.type = 'password';
@@ -1015,6 +1049,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Server definitions')
+			.setClass('va-setting-wide')
 			.setDesc(
 				'JSON array of MCP servers. Each: {"id","name","enabled":true,"trusted":false,"transport":"stdio","command":"npx","args":[...],"env":{}}, {"transport":"http","url":"https://…","headers":{}}, or {"transport":"plugin","pluginId":"obsidian-life-tracker"} (another installed plugin’s tool api, called in-process — works on mobile). stdio servers run only on desktop. Trusted servers’ tools run without an approval prompt.',
 			)
@@ -1052,6 +1087,7 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('System prompt')
+			.setClass('va-setting-wide')
 			.setDesc(
 				'Base instructions for the agent. Current folders and permissions are appended automatically.',
 			)

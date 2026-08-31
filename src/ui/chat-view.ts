@@ -17,6 +17,7 @@ import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
 import {
 	appendConversation,
+	conversationFolders,
 	newConversationPath,
 	parseConversation,
 	saveConversation,
@@ -26,7 +27,7 @@ import { ImportModal } from './import-modal';
 import { WorkflowModal, WorkflowStart } from './workflow-modal';
 import { WorkflowRun, createRunNote } from '../workflows/runner';
 import { prepareContext, stripPrePass } from '../prepass';
-import { suggestConversationTitle } from '../title';
+import { Filing, suggestFiling } from '../filing';
 import { buildOpenFilesBlock, stripOpenFiles } from '../tools/workspace';
 import { AssistantTurn } from './assistant-turn';
 import { fitToContent } from './autogrow';
@@ -86,6 +87,12 @@ export class ChatView extends ItemView {
 	private pendingPath: string | null = null;
 	/** A write the user just approved, whose preview becomes the record of it. */
 	private approvedWrite: { path: string; after: string; card: HTMLElement } | null = null;
+	/**
+	 * True while a save is deciding this conversation's path. Not `busy`,
+	 * which turns Send into Stop and there would be nothing to stop — but
+	 * sending must still wait, or two writers race on the same new file.
+	 */
+	private saving = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: VaultAssistantPlugin) {
 		super(leaf);
@@ -114,6 +121,16 @@ export class ChatView extends ItemView {
 		const newBtn = header.createEl('button', { cls: 'va-new', attr: { 'aria-label': 'New chat' } });
 		setIcon(newBtn, 'plus');
 		newBtn.onclick = () => void this.resetConversation();
+
+		// Always here, even with auto-save on (where it has nothing to do): a
+		// button that comes and goes with a setting is harder to find than a
+		// redundant one.
+		const saveBtn = header.createEl('button', {
+			cls: 'va-new',
+			attr: { 'aria-label': 'Save conversation' },
+		});
+		setIcon(saveBtn, 'save');
+		saveBtn.onclick = () => void this.saveNow();
 
 		const openBtn = header.createEl('button', {
 			cls: 'va-new',
@@ -331,14 +348,16 @@ export class ChatView extends ItemView {
 	 * back from its saved transcript.
 	 */
 	private popOut(): void {
-		if (this.busy) {
+		if (this.busy || this.saving) {
 			this.busyNotice();
 			return;
 		}
 		// The transcript is what travels, so without one the new window starts
 		// a fresh conversation. Say so rather than silently dropping it.
-		if (!this.plugin.settings.autoSaveConversations && this.history.length > 1) {
-			new Notice('Auto-save is off, so this conversation cannot follow the panel to a new window.');
+		if (!this.conversationPath && this.history.length > 1) {
+			new Notice(
+				'This conversation has not been saved, so it cannot follow the panel to a new window. Save it first.',
+			);
 		}
 		try {
 			this.app.workspace.moveLeafToPopout(this.leaf);
@@ -406,11 +425,15 @@ export class ChatView extends ItemView {
 	}
 
 	private busyNotice(): void {
-		new Notice('Wait for the current response to finish, or stop it with Ctrl+C.');
+		new Notice(
+			this.saving
+				? 'Saving this conversation — try again in a moment.'
+				: 'Wait for the current response to finish, or stop it with Ctrl+C.',
+		);
 	}
 
 	private async resetConversation(): Promise<void> {
-		if (this.busy) {
+		if (this.busy || this.saving) {
 			this.busyNotice();
 			return;
 		}
@@ -433,7 +456,7 @@ export class ChatView extends ItemView {
 
 	/** Load a saved transcript back into the chat so it can be continued. */
 	private async openConversation(file: TFile): Promise<void> {
-		if (this.busy) {
+		if (this.busy || this.saving) {
 			this.busyNotice();
 			return;
 		}
@@ -593,23 +616,30 @@ export class ChatView extends ItemView {
 	}
 
 	/**
-	 * Where this conversation's transcript goes. With conversation naming on,
-	 * one extra cheap model call turns the opening exchange into a title;
-	 * otherwise (and whenever that call is skipped or fails) the first message
-	 * is used, as before.
+	 * Where this conversation's transcript goes. With naming or filing on, one
+	 * extra cheap model call turns the opening exchange into a title and the
+	 * name of a folder to keep it under; both settings share that one call, and
+	 * whichever half it fails to answer falls back to the first message and the
+	 * root of the conversations folder, as before.
 	 */
 	private async newConversationPath(firstMessage: string, interrupted: boolean): Promise<string> {
-		let label = '';
+		const s = this.plugin.settings;
+		let filed: Filing = { title: '', folder: '' };
 		// Don't spend a call right after the user hit Stop, or on a turn that
 		// produced nothing to name.
-		if (this.plugin.settings.nameConversations && !interrupted) {
+		if ((s.nameConversations || s.fileConversations) && !interrupted) {
 			const answer = this.lastAssistantContent();
 			if (answer) {
-				this.setStatus('Naming the conversation…');
-				label = await suggestConversationTitle(this.plugin.settings, firstMessage, answer);
+				this.setStatus(
+					s.nameConversations ? 'Naming the conversation…' : 'Filing the conversation…',
+				);
+				filed = await suggestFiling(s, firstMessage, answer, {
+					title: s.nameConversations,
+					folders: s.fileConversations ? conversationFolders(this.app, s) : null,
+				});
 			}
 		}
-		return newConversationPath(this.app, this.plugin.settings, label || firstMessage);
+		return newConversationPath(this.app, s, filed.title || firstMessage, filed.folder);
 	}
 
 	/** The most recent assistant answer in this conversation, if any. */
@@ -622,7 +652,7 @@ export class ChatView extends ItemView {
 	}
 
 	private async send(): Promise<void> {
-		if (this.busy) return;
+		if (this.busy || this.saving) return;
 		const text = this.inputEl.value.trim();
 		if (!text) return;
 
@@ -700,38 +730,81 @@ export class ChatView extends ItemView {
 
 		if (abort.signal.aborted && !stopShown) addInfo(this.messagesEl, 'Stopped.');
 
-		// Name the file once, from the opening exchange — the answer says what
-		// the conversation turned out to be about better than the question does.
-		if (this.plugin.settings.autoSaveConversations && !this.conversationPath) {
-			this.conversationPath = await this.newConversationPath(text, abort.signal.aborted);
+		// A conversation that already has a file keeps it current, whatever
+		// auto-save says: the setting decides whether a transcript is created
+		// without being asked, not whether one that exists stays true. Saving
+		// here, before the panel unblocks, keeps the naming call inside the
+		// busy window so a new message cannot arrive mid-decision.
+		if (this.plugin.settings.autoSaveConversations || this.conversationPath) {
+			await this.persistConversation(abort.signal.aborted);
 		}
 
 		this.abort = null;
 		this.setStatus(null);
 		this.setBusy(false);
+	}
 
-		if (this.plugin.settings.autoSaveConversations && this.conversationPath) {
-			try {
-				if (this.persistedCount > 0) {
-					// Reopened conversation: append only the new turns, so the
-					// original file is preserved as saved.
-					await appendConversation(
-						this.app,
-						this.conversationPath,
-						this.history.slice(this.persistedCount),
-					);
-					this.persistedCount = this.history.length;
-				} else {
-					await saveConversation(
-						this.app,
-						this.plugin.settings,
-						this.conversationPath,
-						this.history,
-					);
-				}
-			} catch (e) {
-				new Notice(`Could not save conversation: ${e instanceof Error ? e.message : String(e)}`);
+	/** The message that opened this conversation — what names and files it. */
+	private firstUserMessage(): string {
+		return this.history.find((m) => m.role === 'user')?.content ?? '';
+	}
+
+	/**
+	 * Write the conversation to its transcript, naming and filing it on the
+	 * first save. Shared by auto-save and the save button, so a conversation
+	 * saved by hand is the same file auto-save would have written. Returns the
+	 * path, or null when there was nothing to save.
+	 */
+	private async persistConversation(interrupted = false): Promise<string | null> {
+		let path = this.conversationPath;
+		if (!path) {
+			// Named once, from the opening exchange — the answer says what the
+			// conversation turned out to be about better than the question does.
+			const first = this.firstUserMessage();
+			if (!first) return null;
+			path = await this.newConversationPath(first, interrupted);
+			this.conversationPath = path;
+		}
+		try {
+			if (this.persistedCount > 0) {
+				// Reopened conversation: append only the new turns, so the
+				// original file is preserved as saved.
+				await appendConversation(this.app, path, this.history.slice(this.persistedCount));
+				this.persistedCount = this.history.length;
+			} else {
+				await saveConversation(this.app, this.plugin.settings, path, this.history);
 			}
+			return path;
+		} catch (e) {
+			new Notice(`Could not save conversation: ${e instanceof Error ? e.message : String(e)}`);
+			return null;
+		}
+	}
+
+	/**
+	 * Save the open conversation now, whatever auto-save says. From here on it
+	 * has a file, so later turns keep that file current — a transcript that
+	 * stops three turns short while looking complete is worse than none.
+	 */
+	private async saveNow(): Promise<void> {
+		if (this.busy) {
+			this.busyNotice();
+			return;
+		}
+		// A second click while the first is still deciding a path.
+		if (this.saving) return;
+		if (!this.firstUserMessage()) {
+			new Notice('Nothing to save yet.');
+			return;
+		}
+		this.saving = true;
+		this.setStatus('Saving…');
+		try {
+			const path = await this.persistConversation();
+			if (path) new Notice(`Saved to ${path}`);
+		} finally {
+			this.saving = false;
+			this.setStatus(null);
 		}
 	}
 
