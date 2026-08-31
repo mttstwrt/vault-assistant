@@ -9,6 +9,16 @@ import { describeOpenFiles } from './workspace';
 import { normalizeArgs, redirectTool } from './aliases';
 import { findFolder, findNote, notFoundMessage, toVaultPath } from './paths';
 import { SearchOptions, renderHits, runSearch } from './search';
+import {
+	SectionRange,
+	describeOutline,
+	isBlockRef,
+	noSuchSection,
+	sectionRange,
+	spliceSection,
+	splitSubpath,
+} from './sections';
+import { describeTags } from './tags';
 
 /** Everything a tool invocation needs: the app, settings, and the approval hooks. */
 export interface ToolContext {
@@ -58,6 +68,71 @@ export const TOOL_SPECS: ToolSpec[] = [
 				path: { type: 'string', description: 'File path relative to the vault root.' },
 			},
 			required: ['path'],
+		},
+	},
+	{
+		name: 'outline',
+		description:
+			"A note's shape without its contents: its heading tree with line ranges, its frontmatter keys, and how many links and tags it has. Use it before read_file on anything long — then pull just the part you need with read_section.",
+		parameters: {
+			type: 'object',
+			properties: {
+				path: { type: 'string', description: 'File path relative to the vault root.' },
+			},
+			required: ['path'],
+		},
+	},
+	{
+		name: 'read_section',
+		description:
+			'Read one section of a note — a heading and everything under it, including its subheadings — instead of the whole file. Also reads a block reference ("#^blockid"). Resolved exactly the way Obsidian resolves [[note#heading]]. Prefer this to read_file whenever you know which part you want.',
+		parameters: {
+			type: 'object',
+			properties: {
+				path: {
+					type: 'string',
+					description: 'File path, optionally with the heading appended: "Notes/Ideas.md#Chunking".',
+				},
+				heading: {
+					type: 'string',
+					description: 'The heading to read, if not already appended to path. "^blockid" for a block.',
+				},
+			},
+			required: ['path'],
+		},
+	},
+	{
+		name: 'write_section',
+		description:
+			'Replace or extend the body of ONE heading section, leaving the rest of the note untouched. Use this rather than write_file whenever you are changing part of a note — write_file replaces the whole file and will lose everything you did not send. The heading line itself is never changed; "append" adds to the end of that section, before the next heading.',
+		parameters: {
+			type: 'object',
+			properties: {
+				path: {
+					type: 'string',
+					description: 'File path, optionally with the heading appended: "Notes/Ideas.md#Chunking".',
+				},
+				heading: { type: 'string', description: 'The heading to write under, if not appended to path.' },
+				content: { type: 'string', description: 'The new body for that section.' },
+				mode: {
+					type: 'string',
+					enum: ['replace', 'append'],
+					description: "'replace' (default) swaps the section body; 'append' adds to the end of it.",
+				},
+			},
+			required: ['path', 'content'],
+		},
+	},
+	{
+		name: 'tags',
+		description:
+			"With no argument: every tag in the vault and how many notes carry it. With a tag: the notes carrying it, children included (#project covers #project/active). Reads Obsidian's metadata, not note contents, so it is cheap — use it instead of searching for a '#word' string.",
+		parameters: {
+			type: 'object',
+			properties: {
+				tag: { type: 'string', description: 'Tag to look up, with or without the leading #. Omit to list all tags.' },
+				limit: { type: 'number', description: 'Max notes to name for one tag (default 40).' },
+			},
 		},
 	},
 	{
@@ -375,6 +450,42 @@ async function doWrite(ctx: ToolContext, path: string, content: string): Promise
 	return `Created ${p}`;
 }
 
+/**
+ * Change a file through Vault.process, which re-reads and writes under
+ * Obsidian's own lock — so an edit the user makes in the note while the agent
+ * is deciding what to write is not silently discarded, which is what a
+ * read-then-modify pair does. `compute` returns the new text, or null to leave
+ * the file alone; the return value says whether anything was written.
+ */
+async function processWrite(
+	ctx: ToolContext,
+	file: TFile,
+	compute: (current: string) => string | null,
+): Promise<boolean> {
+	let before = '';
+	let after: string | null = null;
+	await ctx.app.vault.process(file, (cur) => {
+		before = cur;
+		after = compute(cur);
+		return after ?? cur;
+	});
+	if (after === null) return false;
+	ctx.onFileChange?.({ path: file.path, kind: 'update', before, after });
+	return true;
+}
+
+/**
+ * Append to a file atomically, creating it when it does not exist yet. The
+ * concatenation happens inside process(), so it lands on whatever the note
+ * holds at write time rather than on a copy read moments earlier.
+ */
+async function appendTo(ctx: ToolContext, path: string, addition: string): Promise<string> {
+	const existing = ctx.app.vault.getAbstractFileByPath(path);
+	if (!(existing instanceof TFile)) return await doWrite(ctx, path, addition);
+	await processWrite(ctx, existing, (cur) => `${cur}${addition}`);
+	return `Appended to ${path}`;
+}
+
 /** Permission-checked create/overwrite. */
 async function writeFile(
 	ctx: ToolContext,
@@ -385,6 +496,43 @@ async function writeFile(
 	const denied = await ensureWritable(ctx, tool, path, content);
 	if (denied) return denied;
 	return doWrite(ctx, path, content);
+}
+
+/** The heading a caller passed separately, normalised to a "#…" subpath. */
+function headingArg(args: Record<string, unknown>): string {
+	const raw = str(args.heading).trim();
+	if (!raw) return '';
+	return raw.startsWith('#') ? raw : `#${raw}`;
+}
+
+interface SectionTarget {
+	file: TFile;
+	text: string;
+	range: SectionRange;
+}
+
+/**
+ * Resolve the (file, section) a read_section/write_section call names, taking
+ * the heading either appended to the path or as its own argument — models
+ * write both and neither is wrong. Returns an error string to hand back when
+ * the note or the heading does not resolve.
+ */
+async function resolveSection(
+	app: App,
+	settings: VaultAssistantSettings,
+	args: Record<string, unknown>,
+): Promise<SectionTarget | string> {
+	const { path, subpath } = splitSubpath(str(args.path));
+	const found = findNote(app, settings, path);
+	if (!found.file) return notFoundMessage(found);
+	const file = found.file;
+	const wanted = subpath || headingArg(args);
+	if (!wanted) {
+		return `Error: which section of ${file.path}? Pass a heading, or call outline to see them.`;
+	}
+	const text = await app.vault.cachedRead(file);
+	const range = sectionRange(app, file, wanted, text.length);
+	return range ? { file, text, range } : noSuchSection(app, file, wanted);
 }
 
 /** Coerce an unknown tool argument to a string safely. */
@@ -460,6 +608,52 @@ export async function executeTool(
 				return typeof hits === 'string' ? hits : renderHits(hits, opts);
 			}
 
+			case 'outline': {
+				const found = findNote(app, settings, splitSubpath(str(args.path)).path);
+				if (!found.file) return notFoundMessage(found);
+				return describeOutline(app, found.file, await app.vault.cachedRead(found.file));
+			}
+
+			case 'read_section': {
+				const target = await resolveSection(app, settings, args);
+				if (typeof target === 'string') return target;
+				const { file, text, range } = target;
+				return `${file.path} › ${range.label}\n\n${text.slice(range.start, range.end).trim()}`;
+			}
+
+			case 'write_section': {
+				const target = await resolveSection(app, settings, args);
+				if (typeof target === 'string') return target;
+				const { file, text, range } = target;
+				if (isBlockRef(range.label.slice(file.basename.length))) {
+					return `Error: write_section edits heading sections, not block references. To change a block, edit the section it sits in, or use write_file.`;
+				}
+				const mode = str(args.mode) === 'append' ? 'append' : 'replace';
+				const after = spliceSection(text, range, str(args.content), mode);
+				const denied = await ensureWritable(ctx, 'write_section', file.path, after);
+				if (denied) return denied;
+				// The offsets came from the metadata cache, so they only describe
+				// the text they were resolved against. process() runs under
+				// Obsidian's own lock: if the note moved underneath us, splicing
+				// at stale offsets would corrupt it, so the write is abandoned
+				// and the model is told to look again. Refusing beats guessing.
+				const applied = await processWrite(ctx, file, (cur) =>
+					cur === text ? after : null,
+				);
+				if (!applied) {
+					return `Error: ${file.path} changed while this edit was being prepared — nothing was written. Read the section again and retry.`;
+				}
+				return `Updated ${file.path} › ${range.label}`;
+			}
+
+			case 'tags':
+				return describeTags(
+					app,
+					settings,
+					str(args.tag),
+					Math.min(Math.max(Number(args.limit) || 40, 1), 200),
+				);
+
 			case 'write_file':
 				return await writeFile(
 					ctx,
@@ -471,12 +665,13 @@ export async function executeTool(
 			case 'append_file': {
 				const p = toVaultPath(app, str(args.path));
 				const existing = app.vault.getAbstractFileByPath(p);
-				const cur = existing instanceof TFile ? await app.vault.read(existing) : null;
-				const after = (cur ?? '') + str(args.content);
-				const denied = await ensureWritable(ctx, 'append_file', p, after);
+				const cur = existing instanceof TFile ? await app.vault.cachedRead(existing) : null;
+				// The preview is what the approval card shows; the write itself
+				// re-reads inside process(), so it appends to whatever the note
+				// holds by then rather than to this copy.
+				const denied = await ensureWritable(ctx, 'append_file', p, (cur ?? '') + str(args.content));
 				if (denied) return denied;
-				await doWrite(ctx, p, after);
-				return cur === null ? `Created ${p}` : `Appended to ${p}`;
+				return await appendTo(ctx, p, str(args.content));
 			}
 
 			case 'remember': {
@@ -489,11 +684,10 @@ export async function executeTool(
 				if (!content.trim()) return 'Error: memory content is required.';
 				const existing = app.vault.getAbstractFileByPath(path);
 				if (str(args.mode) !== 'replace' && existing instanceof TFile) {
-					const cur = await app.vault.read(existing);
-					const after = `${cur.trimEnd()}\n\n${content}`;
-					const denied = await ensureWritable(ctx, 'remember', path, after);
+					const cur = await app.vault.cachedRead(existing);
+					const denied = await ensureWritable(ctx, 'remember', path, `${cur.trimEnd()}\n\n${content}`);
 					if (denied) return denied;
-					await doWrite(ctx, path, after);
+					await processWrite(ctx, existing, (fresh) => `${fresh.trimEnd()}\n\n${content}`);
 					return `Remembered (appended to ${path}).`;
 				}
 				await writeFile(ctx, 'remember', path, content);
@@ -552,11 +746,10 @@ export async function executeTool(
 				const content = str(args.content);
 				const existing = app.vault.getAbstractFileByPath(path);
 				if (str(args.mode) === 'append' && existing instanceof TFile) {
-					const cur = await app.vault.read(existing);
-					const after = `${cur}\n\n${content}`;
-					const denied = await ensureWritable(ctx, 'update_wiki', path, after);
+					const cur = await app.vault.cachedRead(existing);
+					const denied = await ensureWritable(ctx, 'update_wiki', path, `${cur}\n\n${content}`);
 					if (denied) return denied;
-					await doWrite(ctx, path, after);
+					await processWrite(ctx, existing, (fresh) => `${fresh}\n\n${content}`);
 					return `Appended to ${path}`;
 				}
 				return await writeFile(ctx, 'update_wiki', path, content);
