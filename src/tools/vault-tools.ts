@@ -19,6 +19,7 @@ import {
 	splitSubpath,
 } from './sections';
 import { describeTags } from './tags';
+import { describeCapabilities } from './capabilities';
 import {
 	blockedChild,
 	ensureFolder,
@@ -47,6 +48,12 @@ export interface ToolContext {
 }
 
 export const TOOL_SPECS: ToolSpec[] = [
+	{
+		name: 'capabilities',
+		description:
+			"What you can actually do in this vault: the tools you have this turn and what each really does, which folders you may read and write, how Obsidian itself will behave (whether links follow a moved note, above all), and what is genuinely impossible here. Read from live settings, not from memory. Call it BEFORE telling the user you can or cannot do something, and before any operation whose consequences you are unsure of.",
+		parameters: { type: 'object', properties: {} },
+	},
 	{
 		name: 'list_files',
 		description:
@@ -657,6 +664,13 @@ export async function executeTool(
 
 	try {
 		switch (name) {
+			case 'capabilities':
+				return await describeCapabilities(
+					app,
+					settings,
+					offered ?? new Set(activeToolSpecs(settings).map((t) => t.name)),
+				);
+
 			case 'list_files': {
 				const raw = typeof args.path === 'string' ? args.path : '';
 				const folder = findFolder(app, raw);

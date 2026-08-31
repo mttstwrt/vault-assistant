@@ -26,6 +26,7 @@ export async function buildSystemPrompt(app: App, settings: VaultAssistantSettin
 			.map((t) => t.name)
 			.join(', ')}${settings.mcpServers.some((s) => s.enabled) ? ', plus any MCP tools listed for this request' : ''}.`,
 		'Paths are always relative to the vault root — "Notes/Ideas.md", never "/home/you/Vault/Notes/Ideas.md" or "C:\\...". There is no working directory, no "~", and no leading slash.',
+		'Before telling the user what you can or cannot do — or how Obsidian will react to something you are about to do, such as whether links follow a note you move — call capabilities. It answers from this vault\'s live settings. Do not guess.',
 	].join('\n');
 
 	const env = [
