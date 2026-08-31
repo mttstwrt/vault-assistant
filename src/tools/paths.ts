@@ -70,6 +70,13 @@ export function findNote(app: App, settings: VaultAssistantSettings, raw: string
 	);
 	if (insensitive) return { file: insensitive, suggestions: [], path };
 
+	// Obsidian's own resolution, before ours: this is what decides where
+	// [[Ideas]] points, so it accepts a bare filename with no folder path and
+	// follows frontmatter aliases — both of which the basename scan below
+	// misses. Asked from no particular note ('') it searches the whole vault.
+	const byLinkpath = app.metadataCache.getFirstLinkpathDest(path.replace(/\.md$/i, ''), '');
+	if (byLinkpath && visible(byLinkpath)) return { file: byLinkpath, suggestions: [], path };
+
 	// The same filename somewhere else in the vault is the usual near-miss.
 	const sameName = files.filter((f) => f.basename.toLowerCase() === base);
 	if (sameName.length === 1 && sameName[0]) return { file: sameName[0], suggestions: [], path };

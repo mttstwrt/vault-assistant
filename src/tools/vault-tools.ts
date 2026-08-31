@@ -8,6 +8,7 @@ import { buildWikiIndex, describeLinks, wikiHomePath } from './graph';
 import { describeOpenFiles } from './workspace';
 import { normalizeArgs, redirectTool } from './aliases';
 import { findFolder, findNote, notFoundMessage, toVaultPath } from './paths';
+import { SearchOptions, renderHits, runSearch } from './search';
 
 /** Everything a tool invocation needs: the app, settings, and the approval hooks. */
 export interface ToolContext {
@@ -33,13 +34,17 @@ export const TOOL_SPECS: ToolSpec[] = [
 	{
 		name: 'list_files',
 		description:
-			'List the files and folders directly inside a vault folder. Use an empty or omitted path for the vault root.',
+			'List the files and folders inside a vault folder. Use an empty or omitted path for the vault root. Raise depth to see a whole subtree in one call instead of walking it level by level.',
 		parameters: {
 			type: 'object',
 			properties: {
 				path: {
 					type: 'string',
 					description: 'Folder path relative to the vault root. Empty/omitted = root.',
+				},
+				depth: {
+					type: 'number',
+					description: 'How many levels to descend. 1 (default) lists the folder itself; max 4.',
 				},
 			},
 		},
@@ -58,12 +63,30 @@ export const TOOL_SPECS: ToolSpec[] = [
 	{
 		name: 'search',
 		description:
-			'Full-text search across markdown notes. Returns matching file paths with short snippets.',
+			'Text search across markdown notes, grep-style: every hit is reported as "path:line: text", several per file where several exist. Supports regular expressions and the usual grep options. This is the tool a grep or ripgrep call means here. For a concept rather than a string use semantic_search; to read what a hit belongs to use read_section.',
 		parameters: {
 			type: 'object',
 			properties: {
-				query: { type: 'string', description: 'Text to search for (case-insensitive).' },
-				limit: { type: 'number', description: 'Max results (default 20, max 50).' },
+				query: { type: 'string', description: 'Text to find, or a regular expression when regex is true.' },
+				regex: {
+					type: 'boolean',
+					description: 'Treat query as a JavaScript regular expression (default false).',
+				},
+				path: {
+					type: 'string',
+					description: 'Only search inside this folder. Omit to search the whole vault.',
+				},
+				case_sensitive: { type: 'boolean', description: 'Default false (grep -i is the default here).' },
+				whole_word: { type: 'boolean', description: 'Match whole words only (grep -w).' },
+				invert: { type: 'boolean', description: 'Report lines that do NOT match (grep -v).' },
+				context: { type: 'number', description: 'Lines of context either side of a hit, 0-3 (grep -C).' },
+				multiline: {
+					type: 'boolean',
+					description: 'Match across line breaks rather than line by line. Slower; use only when the pattern needs it.',
+				},
+				files_only: { type: 'boolean', description: 'List matching file paths only (rg -l).' },
+				limit: { type: 'number', description: 'Max hits overall (default 20, max 100).' },
+				max_per_file: { type: 'number', description: 'Max hits per file (default 3).' },
 			},
 			required: ['query'],
 		},
@@ -198,6 +221,34 @@ export function activeToolSpecs(settings: VaultAssistantSettings): ToolSpec[] {
 	if (!settings.useRag) off.add('semantic_search');
 	if (!settings.useOpenFiles) off.add('open_files');
 	return off.size ? TOOL_SPECS.filter((t) => !off.has(t.name)) : TOOL_SPECS;
+}
+
+/** How deep `list_files` will descend, and how many entries it will print. */
+const MAX_LIST_DEPTH = 4;
+const MAX_LIST_ENTRIES = 500;
+
+/**
+ * A folder's contents, up to `depth` levels down. Paths stay vault-relative on
+ * every line even though indentation already shows the shape: a model copies a
+ * line straight into read_file, and a bare indented name would not resolve.
+ */
+function listFolder(folder: TFolder, settings: VaultAssistantSettings, depth: number): string[] {
+	const out: string[] = [];
+	const walk = (f: TFolder, level: number, indent: string): void => {
+		const children = [...f.children].sort((a, b) => a.path.localeCompare(b.path));
+		for (const c of children) {
+			if (out.length >= MAX_LIST_ENTRIES) return;
+			if (c instanceof TFolder) {
+				out.push(`${indent}${c.path}/`);
+				if (level < depth) walk(c, level + 1, `${indent}  `);
+			} else if (isReadable(c.path, settings)) {
+				out.push(`${indent}${c.path}`);
+			}
+		}
+	};
+	walk(folder, 1, '');
+	if (out.length >= MAX_LIST_ENTRIES) out.push(`…(stopped at ${MAX_LIST_ENTRIES} entries)`);
+	return out;
 }
 
 /** Create a folder and any missing parents. */
@@ -376,10 +427,8 @@ export async function executeTool(
 				const raw = typeof args.path === 'string' ? args.path : '';
 				const folder = findFolder(app, raw);
 				if (!folder) return `Error: no folder "${toVaultPath(app, raw)}" in the vault.`;
-				const lines = folder.children
-					.filter((c) => c instanceof TFolder || isReadable(c.path, settings))
-					.map((c) => (c instanceof TFolder ? `${c.path}/` : c.path))
-					.sort();
+				const depth = Math.min(Math.max(Math.round(Number(args.depth) || 1), 1), MAX_LIST_DEPTH);
+				const lines = listFolder(folder, settings, depth);
 				return lines.length ? lines.join('\n') : '(empty folder)';
 			}
 
@@ -392,24 +441,23 @@ export async function executeTool(
 			}
 
 			case 'search': {
-				const q = str(args.query).toLowerCase();
-				if (!q) return 'Error: a query is required.';
-				const limit = Math.min(Math.max(Number(args.limit) || 20, 1), 50);
-				const results: string[] = [];
-				for (const file of app.vault.getMarkdownFiles()) {
-					if (!isReadable(file.path, settings)) continue;
-					const text = await app.vault.cachedRead(file);
-					const idx = text.toLowerCase().indexOf(q);
-					if (idx >= 0) {
-						const snippet = text
-							.slice(Math.max(0, idx - 40), idx + 80)
-							.replace(/\s+/g, ' ')
-							.trim();
-						results.push(`${file.path}: …${snippet}…`);
-						if (results.length >= limit) break;
-					}
-				}
-				return results.length ? results.join('\n') : 'No matches found.';
+				const query = str(args.query);
+				if (!query) return 'Error: a query is required.';
+				const opts: SearchOptions = {
+					query,
+					regex: args.regex === true,
+					caseSensitive: args.case_sensitive === true,
+					wholeWord: args.whole_word === true,
+					invert: args.invert === true,
+					multiline: args.multiline === true,
+					filesOnly: args.files_only === true,
+					scope: args.path ? toVaultPath(app, str(args.path)) : '',
+					limit: Math.min(Math.max(Number(args.limit) || 20, 1), 100),
+					maxPerFile: Math.min(Math.max(Number(args.max_per_file) || 3, 1), 20),
+					context: Math.min(Math.max(Math.round(Number(args.context) || 0), 0), 3),
+				};
+				const hits = await runSearch(app, settings, opts);
+				return typeof hits === 'string' ? hits : renderHits(hits, opts);
 			}
 
 			case 'write_file':
