@@ -19,7 +19,7 @@ Seven new tools — `capabilities`, `move_file`, `create_folder`, `outline`,
 Two existing tools extended, one parser in the send path, and one correction to a
 lookup table that has started telling the model things that are no longer true.
 
-## 1. Where the code goes
+## 1. Where the code goes, and what it defers to
 
 `src/tools/vault-tools.ts` is already 532 lines and AGENTS.md asks for ~200–300.
 Adding seven tools inline would double it. So the specs and the `executeTool`
@@ -44,6 +44,63 @@ private in `src/tools/vault-tools.ts`, character for character. `create_folder`
 needs a third caller, which is the moment to have one: it moves to
 `src/tools/files.ts` and the two copies are deleted (principle 2 — a change that
 orphans code removes it).
+
+### Deferring to Obsidian: the audit
+
+The rule for this change is that if Obsidian already has a function for
+something, that function wins — it is how compatibility with the app's own
+settings, link formats and file handling comes for free rather than being
+re-derived and then drifting. Applied honestly, that rule finds three places
+where the *existing* code does not defer and should, so they are folded in here
+rather than left as known-wrong:
+
+**`Vault.process(file, fn)`** (@since 1.1.0) is an atomic read-modify-write.
+`append_file` today reads the file, concatenates, and writes — two awaits apart,
+so an edit the user makes in the note between them is silently discarded.
+`update_wiki` in append mode and `remember` in append mode have the same shape,
+and `write_section` (§3) would have added a fourth. All four move to `process`,
+whose callback computes the new text from the text Obsidian holds at write time.
+This is a real bug fix riding along, not a refactor: the failure it removes is
+"the agent ate my paragraph".
+
+**`metadataCache.getFirstLinkpathDest(name, '')`** is Obsidian's own answer to
+"which note is called X", including frontmatter aliases and the user's link
+resolution settings. `paths.ts` currently ends its fallback chain with a
+hand-rolled scan comparing lowercased basenames, which misses aliases entirely
+and can disagree with what the same string would resolve to inside a note. The
+hand-rolled scan stays as the last resort (it powers the "closest matches"
+suggestions), but Obsidian's resolution is tried first.
+
+**`fileManager.generateMarkdownLink(file, sourcePath)`** renders a link in the
+format the user has chosen — wikilink or markdown, shortest path or relative or
+absolute. The system prompt currently instructs the agent to write `[[wikilinks]]`
+by hand, which produces links a user who turned **Use [[Wikilinks]]** off has
+explicitly said they do not want. The wiki tools should generate links through
+this instead of by string concatenation. (Scoped to where the plugin *writes*
+links; reading them is already Obsidian's job via `resolvedLinks`.)
+
+Two places where the rule does not apply, recorded so they are not re-litigated:
+
+- **There is no public search API.** Obsidian's own search lives in the
+  `global-search` internal plugin, which is not public API. §2 is hand-rolled
+  because there is nothing to defer to, not by preference.
+- **`ensureFolder` keeps its loop.** `Vault.createFolder` is documented to throw
+  if the folder exists and says nothing about creating missing parents, so the
+  level-by-level loop that swallows the exists-error is the correct use of it,
+  not a workaround for it.
+
+And one open question, at §7.2: `Vault.getConfig('alwaysUpdateLinks')` *is*
+Obsidian's own function — it is simply undocumented and untyped. The design
+currently reads the config file through public API instead. Under a
+defer-to-Obsidian-wherever-possible rule that call is arguably the right one;
+the argument against is community-catalogue review of internal API use.
+
+One version note, since this change reaches for newer APIs than the code has so
+far: `manifest.json` sets `minAppVersion: 1.7.2`, and `eslint-plugin-obsidianmd`
+fails the build on any API newer than that. Everything above clears it —
+`renameFile` 0.11, `process` 1.1, `createFolder` 1.4, `trashFile` 1.6.6 — but
+`Vault.copy` is 1.8.7, which is one more reason copy is a non-goal rather than a
+freebie.
 
 ## 2. OBS-6 — `search`, and `list_files` depth (do this first)
 
@@ -71,12 +128,24 @@ Rejected for that reason.
   query: string;            // literal text, or a regular expression
   regex?: boolean;          // default false — treat query as a JS regex
   path?: string;            // limit to a folder (prefix match)
-  case_sensitive?: boolean; // default false
-  files_only?: boolean;     // paths only, like `rg -l`
+  case_sensitive?: boolean; // default false           (grep -i, inverted)
+  whole_word?: boolean;     // default false           (grep -w)
+  invert?: boolean;         // lines that do NOT match (grep -v)
+  context?: number;         // lines either side, 0–3  (grep -C)
+  multiline?: boolean;      // match across lines rather than line by line
+  files_only?: boolean;     // paths only              (rg -l)
   limit?: number;           // max hits overall (default 20, max 100)
   max_per_file?: number;    // default 3
 }
 ```
+
+The option list is deliberately grep's, because grep's is the one every model
+already knows and because those flags are what "comprehensive search options"
+actually means in practice — the regular-expression *engine* is not the gap
+(§12 argues this at length). `-i`, `-w`, `-v`, `-C` and `-l` are a few lines
+each on top of the scan; `multiline` is the one that genuinely changes the loop,
+so it gets its own branch that runs the pattern over the whole file text and
+reports the line number of each match's start.
 
 Output becomes grep-shaped, which is the shape every model already knows:
 
@@ -87,12 +156,20 @@ Notes/Embedding.md:7: overlap matters more than chunk size here
 3 matches in 2 files.
 ```
 
-Matching is per line, not per file: the line is the unit that gets a number, the
-unit that gets reported, and — usefully — the unit a regular expression runs
-against, which bounds how much text any single `RegExp.exec` can backtrack over.
+Matching is per line by default, not per file: the line is the unit that gets a
+number, the unit that gets reported, and — usefully — the unit a regular
+expression runs against, which bounds how much text any single `RegExp.exec` can
+backtrack over. `multiline: true` gives that bound up deliberately and is
+documented as the slower mode.
+
 A pattern longer than 200 characters is refused; a pattern that will not compile
 comes back as `Error: "…" is not a valid regular expression: …` rather than
-throwing out of the tool.
+throwing out of the tool. That path also covers a real platform difference:
+lookbehind (`(?<=…)`) throws on iOS before 16.4, which is why
+`eslint-plugin-obsidianmd` bans it in source for any plugin that is not
+`isDesktopOnly`. A model-supplied pattern cannot be linted, so on those devices
+a lookbehind pattern simply fails to compile and the model is told the pattern is
+not supported here — the same route as any other bad pattern.
 
 The scan is still `cachedRead` over `getMarkdownFiles()` filtered by `isReadable`,
 with the `path` prefix applied first so a scoped search does not read the vault,
@@ -104,6 +181,61 @@ because the pre-pass needed the same scan and there was nowhere shared to put it
 Now there is: it calls the new module and the copy is deleted. Its caller wants a
 plain snippet list rather than line-numbered hits, so the module exports the scan
 and the two callers format it — one shape of the search, two renderings.
+
+### Why not shell out to real grep or ripgrep
+
+Considered seriously, because grep's option surface is decades deeper than
+anything worth writing here, and rejected on four counts that are about the
+plugin rather than about grep.
+
+**It does not exist on most of the platforms this plugin targets.**
+`manifest.json` says `isDesktopOnly: false`: this runs on iOS and Android, where
+there is no shell and no `child_process` at all. Stock Windows has no `grep`
+either — `findstr` is a different tool with different syntax — and ripgrep is not
+installed by default on macOS or on any mainstream Linux distribution. So a
+shell-backed search would work on macOS and Linux desktops and nowhere else,
+which would make the agent's abilities depend on the device it happens to be
+running on. That is the exact thing OBS-1 exists to eliminate; `capabilities`
+would end up reporting a search tool that half the users cannot have.
+
+**It moves the privacy boundary from one function into argument construction.**
+Right now every path in this plugin passes `isReadable(path, settings)` — one
+function, one place, and the read blocklist is enforced identically for every
+tool. Handing the job to grep means translating that blocklist into
+`--exclude-dir` / `--glob '!…'` arguments and getting the quoting right for
+arbitrary user folder names, plus excluding `.obsidian/`, `.trash/`, the plugin's
+own `rag-index.json`, and every binary attachment in the vault. A mistake there
+leaks the contents of a folder the user explicitly hid. That is the one class of
+bug this design is least willing to risk, and argv is a much weaker place to
+enforce it than a function call.
+
+**It adds a process-execution surface to a plugin heading for the community
+catalogue.** Done correctly it is `execFile` with an argument array and never a
+shell, so injection from a model-supplied pattern is preventable — but "executes
+external commands" is a thing plugin review looks hard at, and AGENTS.md's
+security section asks for the minimum necessary scope.
+
+**Speed is not the motivation.** A large personal vault is single-digit to
+low-tens of megabytes of markdown, much of it already in Obsidian's read cache;
+process spawn costs 10–30 ms before anything is read. ripgrep wins decisively on
+a ten-gigabyte monorepo, which is not what is being searched here. Principle 3
+says not to trade clarity for unmeasured speed, and there is no measurement
+pointing this way.
+
+What is actually lost by staying in-process is *options*, not engine power — JS
+`RegExp` has lookahead, backreferences, named groups and unicode property escapes;
+what it lacks against `rg` is `-A/-B/-C`, `-w`, `-v`, `--multiline` and friends,
+and those are a few lines of our own code each. So they are simply implemented,
+above.
+
+**If real ripgrep is wanted anyway, the architecture already has the right slot
+for it, and it is not this tool.** The plugin is an MCP client with a server
+allowlist, a trust flag and an approval card. A filesystem/ripgrep MCP server is
+a user-installed, separately-disclosed, individually-approvable component that
+gets full rg without putting `child_process` into the plugin or moving the
+blocklist into argv. That keeps the built-in tool honest about what it is (a
+portable, always-available search) and lets the desktop user who wants rg have
+exactly rg.
 
 ### `list_files` depth
 
@@ -493,6 +625,49 @@ would return the same passage twice under two paths. It skips fenced regions, th
 same way it already skips `> 🔧` tool lines. Same fence-tracking helper, exported
 once and used by both.
 
+### Autocomplete, and why it is not in this change
+
+Obsidian's link autocomplete — the popover that appears when you type `[[` in a
+note — is an `EditorSuggest`, registered with `registerEditorSuggest` and driven
+by the CodeMirror editor's cursor. It runs inside a markdown editor and nowhere
+else. The chat composer is a plain `<textarea>` (`chat-view.ts:223`), so
+Obsidian's own suggester will not appear in it and cannot be made to.
+
+The sanctioned way to attach a suggester to something outside the editor is
+`AbstractInputSuggest`, which the lint plugin actively pushes plugins toward. Its
+constructor signature is the obstacle:
+
+```ts
+constructor(app: App, textInputEl: HTMLInputElement | HTMLDivElement);
+```
+
+A `<textarea>` is neither. Casting one through is tempting and is rejected on the
+same grounds as `Vault.getConfig` in §7.2, only more so: the class accepts a
+contenteditable `<div>` *or* an `<input>`, so its implementation must branch on
+which it got, and a textarea landing in the contenteditable branch would read
+`textContent` where it should read `value`. That is a cast whose safety depends
+on implementation details we cannot see, which is a worse bet than one whose
+behaviour is at least well known.
+
+There are two honest routes to a real suggester, and both are their own change:
+switch the composer to a contenteditable `<div>` (supported by the constructor,
+but `fitToContent`, `.value`, Enter-to-send, placeholder and paste-as-plain-text
+all touch the textarea today), or write a small suggester of our own (~120 lines
+of positioned popover and keyboard navigation; the lint rule only objects to the
+specific copied `createPopper` implementation, not to the idea).
+
+What *is* in this change is the cheap 80%: because the pre-parser resolves every
+link anyway, a link that resolves to nothing is already known, and the panel says
+so with the near-miss naming `paths.ts` already computes —
+
+```
+↘ inlined Notes/Chunking.md · [[Overlp]] matched no note — did you mean Notes/Overlap.md?
+```
+
+That closes the loop a suggester would have closed, one step later and for
+roughly five lines. Suggestions are listed as a follow-up in §12; the near-miss
+line is what makes it a nicety rather than a gap.
+
 ### Setting and visibility
 
 `expandTypedLinks: boolean`, default **true**, as **Expand `[[links]]` you
@@ -537,9 +712,16 @@ New argument aliases in `ARG_ALIASES`: `destination`, `new_path`, `target`,
 
 Each phase is independently landable and independently judgeable.
 
-1. **§2 search + list_files.** No new data flow. Lands alone.
+0. **A tool-selection baseline.** Before adding anything: the ~12-prompt harness
+   from §11, run against the current 13 tools on both target models, so the
+   number this change is judged against exists before the change does. Cheap, and
+   without it "did the tool list get too long" stays an opinion.
+1. **§2 search + list_files**, and the `getFirstLinkpathDest` fallback from §1.
+   No new data flow. Lands alone.
 2. **§3 sections** (all three together) and **§4 tags**. Pure additions over
-   `metadataCache`.
+   `metadataCache`. The move of `append_file`, `remember` and `update_wiki` onto
+   `Vault.process` (§1) rides here, since `write_section` is written against it
+   anyway.
 3. **§5 create_folder** and **§6 move_file**, with the `ApprovalRequest` kinds,
    the folder-readability rule, the link verification, and the panel's rename
    listener. This is the phase that touches the permission model.
@@ -560,16 +742,59 @@ carries what is durable and git history carries the rest.
 
 ## 11. Risks
 
-**Twenty tools is a lot for a small model.** This is the main risk and it is
-not hypothetical: the context pre-pass exists in this plugin *because* small
-local models flail at tool selection, and this change grows the built-in set from
-13 to 20 before any MCP server is connected. Mitigations in the design: names
-stay verb-shaped and distinct, `capabilities` groups them by purpose rather than
-listing them flat, and the tools that most often replace a bad choice
-(`read_section` instead of `read_file`, a scoped `search`) are strictly cheaper
-than what they replace. If acceptance test 26 fails, the fallback is a settings
-toggle that offers the section and structure tools only when asked for — but that
-is a knob nobody has asked for yet, so it is not in this change (principle 2).
+**Twenty tools, and what that actually costs.** The first draft of this section
+said "small models flail at tool selection" and left it there, which conflated
+two different things. Separating them:
+
+*Parameter count is the weaker factor.* The pre-pass was built for the 3–8B
+class, where tool selection genuinely degrades with a long list. At 27–32B —
+Gemma 3 27B and Qwen3 32B, the models this vault is actually driven with — a
+twenty-tool list is well inside what the class handles. The sharp degradation
+people report tends to start much further out, in the 40–60+ range, and it is
+usually overlapping tool *descriptions* rather than the count that causes it.
+
+*Tool-calling training is the stronger factor, and the two models differ.*
+Qwen3 ships explicit tool-call training and a tool-call section in its chat
+template, so an OpenAI-compatible endpoint emits structured calls natively.
+Gemma 3 does not ship native tool-call tokens; function calling with it is
+prompt-shaped — the schemas go in the prompt and JSON is parsed back out of the
+content — which llama.cpp handles with a generic fallback format. The same
+twenty tools will therefore behave noticeably differently between the two, and
+Gemma is the one to watch. (State of the art moves; check what `--jinja` reports
+for the template actually in use rather than trusting this paragraph.)
+
+*Context cost is concrete and measurable, and is arguably the real price.* The
+current 13 specs serialize to ~5.7k characters, about 1.6k tokens, plus the
+per-tool wrapper the OpenAI wire format adds — call it 1.7k. Seven more of
+similar length puts it near 2.5k. On a 32k window, that is a rise from roughly
+5% to roughly 8%, spent on every single request whether or not the conversation
+needs any of it. It sits in the cached prefix so it costs little *time*, but the
+space is gone. The panel's context ring already makes this visible.
+
+Mitigations, in order of leverage:
+
+1. **Disjoint descriptions with explicit cross-references** — "use `read_section`
+   rather than `read_file` when you already know the heading". Description
+   quality beats count, which is also the reasoning behind §2.1's refusal to ship
+   `grep` beside `search`.
+2. **Constrained decoding.** llama.cpp with `--jinja` and a model whose template
+   declares tools will constrain tool-call output with a grammar, which removes
+   malformed-call failures rather than reducing them. This is a documentation and
+   settings matter, not code, and it is exactly what a Gemma-class template
+   without a tool section cannot give you — worth a README troubleshooting entry
+   alongside the repetition-penalty one.
+3. **Trimming already exists.** `activeToolSpecs` drops tools by setting, and
+   workflow steps already take a `tools` allowlist. If a group toggle is ever
+   needed, the machinery is there; building it now would be a knob ahead of its
+   evidence (principle 2).
+
+And rather than argue about it — **measure it (phase 0, §10)**. A fixed set of
+~12 prompts with a known-correct first tool call, run at 13 tools and at 20
+against both models, scoring first-call accuracy and rounds-to-answer. It is an
+afternoon's work, it turns this risk into a number, and it is reusable for every
+future tool addition instead of being spent once. If it comes back bad, the
+answer it gives also says *which* tools are being confused, which a toggle
+designed in advance would only have guessed at.
 
 **`resolveSubpath` needs the metadata cache.** A note written seconds ago may not
 be parsed yet, so `read_section` on it returns "no headings cached for this note
@@ -627,7 +852,17 @@ Recorded so the next change argues with this rather than rediscovering it.
   codebase's consistent pattern of a pointer plus lazy loading.
 - **Splicing inlined notes at the link's position** rather than appending. §8.2.
 - **A separate `grep` tool** beside `search`. §2.1.
-- **`Vault.getConfig` for `alwaysUpdateLinks`.** §7.2.
+- **Shelling out to real grep or ripgrep.** §2.3 — the short version is mobile
+  and Windows have neither, and the read blocklist is safer as a function call
+  than as `--exclude-dir` arguments. An MCP filesystem/ripgrep server is the
+  supported way to have the real thing.
+- **Link autocomplete in the chat composer.** §8.4 — Obsidian's own suggester is
+  editor-only and `AbstractInputSuggest` will not take a `<textarea>`. Worth
+  doing as its own change; the near-miss line covers most of the value meanwhile.
+- **`Vault.getConfig` for `alwaysUpdateLinks`.** §7.2, and re-opened in §1's
+  audit — under a strict defer-to-Obsidian rule this one is genuinely arguable.
+- **`Vault.copy`.** Not just unwanted (copy is a non-goal) but @since 1.8.7,
+  above this plugin's `minAppVersion` of 1.7.2, so the lint rule would reject it.
 
 ---
 
