@@ -602,6 +602,8 @@ interface SectionTarget {
 	file: TFile;
 	text: string;
 	range: SectionRange;
+	/** The "#heading" or "#^block" this resolved, however the caller spelled it. */
+	subpath: string;
 }
 
 /**
@@ -625,7 +627,7 @@ async function resolveSection(
 	}
 	const text = await app.vault.cachedRead(file);
 	const range = sectionRange(app, file, wanted, text.length);
-	return range ? { file, text, range } : noSuchSection(app, file, wanted);
+	return range ? { file, text, range, subpath: wanted } : noSuchSection(app, file, wanted);
 }
 
 /** Coerce an unknown tool argument to a string safely. */
@@ -717,15 +719,15 @@ export async function executeTool(
 			case 'read_section': {
 				const target = await resolveSection(app, settings, args);
 				if (typeof target === 'string') return target;
-				const { file, text, range } = target;
-				return `${file.path} › ${range.label}\n\n${text.slice(range.start, range.end).trim()}`;
+				const { file, text, range, subpath } = target;
+				return `${file.path}${subpath}\n\n${text.slice(range.start, range.end).trim()}`;
 			}
 
 			case 'write_section': {
 				const target = await resolveSection(app, settings, args);
 				if (typeof target === 'string') return target;
-				const { file, text, range } = target;
-				if (isBlockRef(range.label.slice(file.basename.length))) {
+				const { file, text, range, subpath } = target;
+				if (isBlockRef(subpath)) {
 					return `Error: write_section edits heading sections, not block references. To change a block, edit the section it sits in, or use write_file.`;
 				}
 				const mode = str(args.mode) === 'append' ? 'append' : 'replace';
@@ -743,7 +745,7 @@ export async function executeTool(
 				if (!applied) {
 					return `Error: ${file.path} changed while this edit was being prepared — nothing was written. Read the section again and retry.`;
 				}
-				return `Updated ${file.path} › ${range.label}`;
+				return `Updated ${file.path}${subpath}`;
 			}
 
 			case 'tags':
@@ -784,7 +786,9 @@ export async function executeTool(
 				const hidden = blockedChild(source, settings);
 				if (hidden) return hidden;
 
-				const to = resolveDestination(app, source, toVaultPath(app, str(args.to)));
+				// The raw string, not a normalized one: resolveDestination reads the
+				// trailing slash, which normalizing removes.
+				const to = resolveDestination(app, source, str(args.to));
 				if (to === source.path) return `Error: ${source.path} is already there.`;
 				if (app.vault.getAbstractFileByPath(to)) {
 					return `Error: "${to}" already exists. Pick another name, or move the existing one first.`;

@@ -10,6 +10,7 @@ import { App, TAbstractFile, TFile, TFolder, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from '../settings';
 import { isReadable } from '../permissions';
 import { buildBacklinks } from './graph';
+import { toVaultPath } from './paths';
 
 /** How long to wait for the metadata cache to settle after a move. */
 const RESOLVE_TIMEOUT_MS = 3000;
@@ -43,9 +44,15 @@ export async function ensureFolder(app: App, folder: string): Promise<void> {
  * into it, keep the name"; anything else is the new full path.
  */
 export function resolveDestination(app: App, source: TAbstractFile, to: string): string {
-	const raw = normalizePath(to.replace(/\/+$/, ''));
+	// The trailing slash has to be read before normalizing, which strips it —
+	// it is the way to say "a folder" about one that does not exist yet, and
+	// the only thing distinguishing that from a new filename. Everything else
+	// goes through toVaultPath, so a destination arrives here as sloppily as a
+	// source may: an absolute path, a Windows one, a leading "./".
+	const wantsFolder = to.trim().endsWith('/');
+	const raw = toVaultPath(app, to.replace(/\/+$/, ''));
 	const existing = app.vault.getAbstractFileByPath(raw);
-	const intoFolder = existing instanceof TFolder || to.trim().endsWith('/');
+	const intoFolder = existing instanceof TFolder || wantsFolder;
 	if (intoFolder) return normalizePath(`${raw}/${source.name}`);
 
 	// A destination with no extension, for a file that has one, means a folder

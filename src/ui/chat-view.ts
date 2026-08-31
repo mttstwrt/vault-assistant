@@ -706,6 +706,16 @@ export class ChatView extends ItemView {
 
 		this.inputEl.value = '';
 		fitToContent(this.inputEl);
+		const bubble = addUserBubble(this.messagesEl, text);
+		this.scrollToBottom(true);
+
+		// Busy before the first await, not after: expanding links reads notes,
+		// and until this is set a second Enter re-enters send() and sends the
+		// same turn twice.
+		const abort = new AbortController();
+		this.abort = abort;
+		this.setBusy(true);
+		this.setStatus('Thinking…');
 
 		// A [[link]] the user typed is an unambiguous "this note, please", so it
 		// is resolved here and attached to the message rather than costing the
@@ -715,16 +725,11 @@ export class ChatView extends ItemView {
 		const expansion = this.plugin.settings.expandTypedLinks
 			? await expandWikilinks(this.app, this.plugin.settings, text, this.linkSourcePath())
 			: null;
-
+		if (expansion) {
+			addInlinedNote(bubble, describeExpansion(expansion));
+			this.scrollToBottom();
+		}
 		this.history.push({ role: 'user', content: text + (expansion?.block ?? '') });
-		const bubble = addUserBubble(this.messagesEl, text);
-		if (expansion) addInlinedNote(bubble, describeExpansion(expansion));
-		this.scrollToBottom(true);
-
-		const abort = new AbortController();
-		this.abort = abort;
-		this.setBusy(true);
-		this.setStatus('Thinking…');
 
 		const system = this.history[0];
 		if (system?.role === 'system') {
