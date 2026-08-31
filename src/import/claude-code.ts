@@ -1,7 +1,7 @@
 import { App, TFile, moment, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from '../settings';
 import { ChatMessage } from '../types';
-import { ensureFolder } from '../conversation';
+import { ensureFolder } from '../tools/files';
 import { ImportOutcome, thinkingCallout, writeConversation } from './common';
 
 /**

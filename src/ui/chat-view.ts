@@ -116,6 +116,15 @@ export class ChatView extends ItemView {
 		root.empty();
 		root.addClass('vault-assistant');
 
+		// The agent can move notes now, and the open conversation's transcript
+		// is a note like any other. Without this the panel keeps saving to the
+		// path the file left, quietly forking the user's history in two.
+		this.registerEvent(
+			this.app.vault.on('rename', (file, oldPath) => {
+				if (this.conversationPath === oldPath) this.conversationPath = file.path;
+			}),
+		);
+
 		const header = root.createDiv({ cls: 'va-header' });
 		header.createEl('span', { text: 'Vault assistant', cls: 'va-title' });
 		const newBtn = header.createEl('button', { cls: 'va-new', attr: { 'aria-label': 'New chat' } });
@@ -498,7 +507,17 @@ export class ChatView extends ItemView {
 			const head = card.createDiv({ cls: 'va-approval-head' });
 			setIcon(head.createSpan({ cls: 'va-approval-icon' }), 'shield-alert');
 			head.createSpan({ text: req.kind === 'mcp' ? ' External tool call' : ' Approval required' });
-			if (req.kind === 'mcp') {
+			if (req.kind === 'move' || req.kind === 'create-folder') {
+				card.createDiv({
+					cls: 'va-approval-body',
+					text:
+						req.kind === 'move'
+							? `The agent wants to move something outside your allowed folders (via ${req.tool}):`
+							: `The agent wants to create a folder outside your allowed folders (via ${req.tool}):`,
+				});
+				const line = card.createEl('code', { cls: 'va-approval-path' });
+				line.setText(req.kind === 'move' ? `${req.path ?? ''}  →  ${req.toPath ?? ''}` : (req.path ?? ''));
+			} else if (req.kind === 'mcp') {
 				card.createDiv({
 					cls: 'va-approval-body',
 					text: `The agent wants to call an external MCP tool on "${req.serverName}":`,
@@ -542,7 +561,8 @@ export class ChatView extends ItemView {
 			if (req.kind === 'mcp') {
 				addBtn(`Always trust ${req.serverName}`, 'always-trust', 'va-always');
 			} else {
-				addBtn('Always: this file', 'always-file', 'va-always');
+				// "This file" means nothing when the thing being made IS a folder.
+				if (req.kind !== 'create-folder') addBtn('Always: this file', 'always-file', 'va-always');
 				if (req.folder) addBtn(`Always: ${req.folder}/`, 'always-folder', 'va-always');
 			}
 

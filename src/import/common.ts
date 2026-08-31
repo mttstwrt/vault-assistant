@@ -1,7 +1,8 @@
 import { App, moment, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from '../settings';
 import { ChatMessage } from '../types';
-import { conversationSlug, ensureFolder, renderMessages } from '../conversation';
+import { conversationSlug, renderMessages } from '../conversation';
+import { ensureFolder } from '../tools/files';
 
 /**
  * Shared shape for the universal importer: every source (Claude Code logs,

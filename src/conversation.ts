@@ -1,6 +1,7 @@
 import { App, TFile, TFolder, moment, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
 import { ChatMessage } from './types';
+import { ensureFolder } from './tools/files';
 
 /** Sanitise a title or first message into a short filename-safe slug. */
 export function conversationSlug(label: string): string {
@@ -130,21 +131,6 @@ export function parseConversation(md: string): ChatMessage[] {
 	}
 	flush();
 	return messages;
-}
-
-export async function ensureFolder(app: App, folder: string): Promise<void> {
-	const parts = normalizePath(folder).split('/').filter(Boolean);
-	let cur = '';
-	for (const p of parts) {
-		cur = cur ? `${cur}/${p}` : p;
-		if (!app.vault.getAbstractFileByPath(cur)) {
-			try {
-				await app.vault.createFolder(cur);
-			} catch {
-				// ignore races / already-exists
-			}
-		}
-	}
 }
 
 /** Write (or overwrite) the conversation transcript at `path`. */

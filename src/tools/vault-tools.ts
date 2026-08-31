@@ -19,6 +19,12 @@ import {
 	splitSubpath,
 } from './sections';
 import { describeTags } from './tags';
+import {
+	blockedChild,
+	ensureFolder,
+	moveThroughObsidian,
+	resolveDestination,
+} from './files';
 
 /** Everything a tool invocation needs: the app, settings, and the approval hooks. */
 export interface ToolContext {
@@ -193,6 +199,35 @@ export const TOOL_SPECS: ToolSpec[] = [
 		},
 	},
 	{
+		name: 'move_file',
+		description:
+			"Move or rename a note or a folder. This goes through Obsidian itself, the same as dragging it in the file explorer, so [[links]] pointing at it are updated the way Obsidian updates them — and the result tells you whether they actually followed. Use it instead of writing a copy and abandoning the original. Needs write permission at both ends.",
+		parameters: {
+			type: 'object',
+			properties: {
+				path: { type: 'string', description: 'The note or folder to move, relative to the vault root.' },
+				to: {
+					type: 'string',
+					description:
+						'Where it goes. An existing folder means "move into it, keep the name"; anything else is the new full path.',
+				},
+			},
+			required: ['path', 'to'],
+		},
+	},
+	{
+		name: 'create_folder',
+		description:
+			'Create a folder, and any parent folders missing above it. Use this when a folder needs to exist — never create a placeholder note to bring one into being.',
+		parameters: {
+			type: 'object',
+			properties: {
+				path: { type: 'string', description: 'Folder path relative to the vault root.' },
+			},
+			required: ['path'],
+		},
+	},
+	{
 		name: 'remember',
 		description:
 			"Save a durable fact to your operating memory — something you should know at the START of every future conversation: where data lives, the formats/conventions the user uses, and corrections (e.g. \"habits are tracked in Trackers/2026.base now, not the old Habits/ folder\"). This memory file is injected into your context automatically each session, so keep it short and high-signal. Prefer mode 'replace' with a cleaned-up full version to dedupe and fix stale entries; use 'append' to quickly add one new fact. This is for HOW the vault works — use update_wiki for WHAT is in it.",
@@ -326,22 +361,6 @@ function listFolder(folder: TFolder, settings: VaultAssistantSettings, depth: nu
 	return out;
 }
 
-/** Create a folder and any missing parents. */
-async function ensureFolder(app: App, folder: string): Promise<void> {
-	const parts = normalizePath(folder).split('/').filter(Boolean);
-	let cur = '';
-	for (const p of parts) {
-		cur = cur ? `${cur}/${p}` : p;
-		if (!app.vault.getAbstractFileByPath(cur)) {
-			try {
-				await app.vault.createFolder(cur);
-			} catch {
-				// Folder may already exist (race); ignore.
-			}
-		}
-	}
-}
-
 /** What a file holds right now, or '' when it doesn't exist yet. */
 async function currentContent(app: App, path: string): Promise<string> {
 	const f = app.vault.getAbstractFileByPath(path);
@@ -392,6 +411,73 @@ async function ensureWritable(
 		case 'deny':
 		default:
 			return `Error: writing to "${p}" is not permitted. Writable folders: ${displayScopes(writeScopes(ctx.settings))}.`;
+	}
+}
+
+/** The "you may not" message, naming what the agent may in fact touch. */
+function outOfScope(ctx: ToolContext, what: string): string {
+	return `Error: ${what} is not permitted. Writable folders: ${displayScopes(writeScopes(ctx.settings))}.`;
+}
+
+/**
+ * Gate a move. Both ends need write permission, and the user is asked once for
+ * the move rather than twice for its halves — approving the removal but not the
+ * arrival is not a state anyone wants to be in.
+ */
+async function ensureMovable(ctx: ToolContext, from: string, to: string): Promise<string | null> {
+	const ok = (p: string): boolean =>
+		isWritable(p, ctx.settings) || ctx.sessionWrites.has(p);
+	if (ok(from) && ok(to)) return null;
+
+	const decision = await ctx.requestApproval({
+		kind: 'move',
+		tool: 'move_file',
+		path: from,
+		toPath: to,
+		folder: parentFolder(to),
+	});
+	switch (decision) {
+		case 'once':
+			return null;
+		case 'session':
+			ctx.sessionWrites.add(from);
+			ctx.sessionWrites.add(to);
+			return null;
+		case 'always-file':
+			ctx.settings.writePaths.push(from, to);
+			await ctx.saveSettings();
+			return null;
+		case 'always-folder':
+			ctx.settings.writePaths.push(parentFolder(from) || from, parentFolder(to) || to);
+			await ctx.saveSettings();
+			return null;
+		default:
+			return outOfScope(ctx, `moving "${from}" to "${to}"`);
+	}
+}
+
+/** Gate a folder creation: no contents, but still a directory in someone's vault. */
+async function ensureFolderAllowed(ctx: ToolContext, path: string): Promise<string | null> {
+	if (isWritable(path, ctx.settings) || ctx.sessionWrites.has(path)) return null;
+
+	const decision = await ctx.requestApproval({
+		kind: 'create-folder',
+		tool: 'create_folder',
+		path,
+		folder: parentFolder(path),
+	});
+	switch (decision) {
+		case 'once':
+			return null;
+		case 'session':
+			ctx.sessionWrites.add(path);
+			return null;
+		case 'always-folder':
+			ctx.settings.writePaths.push(parentFolder(path) || path);
+			await ctx.saveSettings();
+			return null;
+		default:
+			return outOfScope(ctx, `creating the folder "${path}"`);
 	}
 }
 
@@ -672,6 +758,44 @@ export async function executeTool(
 				const denied = await ensureWritable(ctx, 'append_file', p, (cur ?? '') + str(args.content));
 				if (denied) return denied;
 				return await appendTo(ctx, p, str(args.content));
+			}
+
+			case 'move_file': {
+				const found = findNote(app, settings, str(args.path));
+				// A folder is not a note, so findNote misses one; try that next.
+				const source =
+					found.file ?? findFolder(app, str(args.path)) ?? null;
+				if (!source) return notFoundMessage(found);
+
+				const hidden = blockedChild(source, settings);
+				if (hidden) return hidden;
+
+				const to = resolveDestination(app, source, toVaultPath(app, str(args.to)));
+				if (to === source.path) return `Error: ${source.path} is already there.`;
+				if (app.vault.getAbstractFileByPath(to)) {
+					return `Error: "${to}" already exists. Pick another name, or move the existing one first.`;
+				}
+
+				// A move is a removal at one end and a creation at the other, so
+				// it needs permission at both — asked once, for the whole move.
+				const denied = await ensureMovable(ctx, source.path, to);
+				if (denied) return denied;
+
+				const parent = parentFolder(to);
+				if (parent) await ensureFolder(app, parent);
+				return await moveThroughObsidian(app, source, to);
+			}
+
+			case 'create_folder': {
+				const p = toVaultPath(app, str(args.path));
+				if (!p) return 'Error: a folder path is required.';
+				const existing = app.vault.getAbstractFileByPath(p);
+				if (existing instanceof TFolder) return `${p} already exists.`;
+				if (existing) return `Error: "${p}" is a file, not a folder.`;
+				const denied = await ensureFolderAllowed(ctx, p);
+				if (denied) return denied;
+				await ensureFolder(app, p);
+				return `Created folder ${p}`;
 			}
 
 			case 'remember': {
