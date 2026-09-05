@@ -2,7 +2,7 @@ import { App } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
 import { chatCompletion } from './api/client';
 import { RagIndexer } from './rag/indexer';
-import { isReadable } from './permissions';
+import { searchSnippets } from './tools/search';
 
 /**
  * Context pre-pass: before answering, expand the user's message into a few
@@ -54,7 +54,7 @@ export async function prepareContext(
 			// Index problems come back as prose, not hits — fall through to literal.
 			if (!hits.includes(': …')) hits = '';
 		}
-		if (!hits) hits = await literalSearch(app, settings, q, 4);
+		if (!hits) hits = await searchSnippets(app, settings, q, 4);
 		if (hits) sections.push(`Search "${q}":\n${hits}`);
 	}
 	if (sections.length === 0) return null;
@@ -93,29 +93,4 @@ async function extractQueries(
 	const parsed: unknown = JSON.parse(text.slice(start, end + 1));
 	if (!Array.isArray(parsed)) return [];
 	return parsed.filter((q): q is string => typeof q === 'string' && q.trim().length > 0);
-}
-
-/** Case-insensitive substring scan, same shape as the `search` tool's results. */
-async function literalSearch(
-	app: App,
-	settings: VaultAssistantSettings,
-	query: string,
-	limit: number,
-): Promise<string> {
-	const q = query.toLowerCase();
-	const results: string[] = [];
-	for (const file of app.vault.getMarkdownFiles()) {
-		if (!isReadable(file.path, settings)) continue;
-		const text = await app.vault.cachedRead(file);
-		const idx = text.toLowerCase().indexOf(q);
-		if (idx >= 0) {
-			const snippet = text
-				.slice(Math.max(0, idx - 40), idx + 80)
-				.replace(/\s+/g, ' ')
-				.trim();
-			results.push(`${file.path}: …${snippet}…`);
-			if (results.length >= limit) break;
-		}
-	}
-	return results.join('\n');
 }

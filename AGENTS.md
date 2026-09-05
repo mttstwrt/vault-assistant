@@ -110,7 +110,7 @@ Follow Obsidian's **Developer Policies** and **Plugin Guidelines**. In particula
 - Clearly disclose any external services used, data sent, and risks.
 - Respect user privacy. Do not collect vault contents, filenames, or personal information unless absolutely necessary and explicitly consented.
 - Avoid deceptive patterns, ads, or spammy notifications.
-- **This plugin's network egress**: chat sends the notes the agent reads to the configured model endpoint; the opt-in semantic search feature additionally sends indexed note contents to the configured embeddings endpoint. Both are documented in `README.md`. Any new feature that transmits vault contents must be opt-in, disclosed there, and must respect the read-block list (`isReadable`).
+- **This plugin's network egress**: chat sends the notes the agent reads to the configured model endpoint; the **Expand [[links]] you type** feature (on by default) additionally sends the text of any note the user names with a `[[link]]` in their message, without the model asking for it; the opt-in semantic search feature additionally sends indexed note contents to the configured embeddings endpoint. Both are documented in `README.md`. Any new feature that transmits vault contents must be opt-in, disclosed there, and must respect the read-block list (`isReadable`).
 - Register and clean up all DOM, app, and interval listeners using the provided `register*` helpers so the plugin unloads safely.
 
 ## UX & copy guidelines (for UI text, commands, settings)

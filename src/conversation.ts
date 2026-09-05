@@ -1,6 +1,8 @@
 import { App, TFile, TFolder, moment, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
 import { ChatMessage } from './types';
+import { ensureFolder } from './tools/files';
+import { makeFenceTracker } from './wikilinks';
 
 /** Sanitise a title or first message into a short filename-safe slug. */
 export function conversationSlug(label: string): string {
@@ -117,8 +119,14 @@ export function parseConversation(md: string): ChatMessage[] {
 		buf = [];
 	};
 
+	// A note attached by the wikilink expander can itself be a saved
+	// conversation, whose own section headings would otherwise split one turn
+	// into several here. Inside a fence, nothing is a marker.
+	const fenced = makeFenceTracker();
 	for (const line of body.split('\n')) {
-		if (line.startsWith('## 🧑 You')) {
+		if (fenced(line)) {
+			buf.push(line);
+		} else if (line.startsWith('## 🧑 You')) {
 			flush();
 			role = 'user';
 		} else if (line.startsWith('## 🤖 Assistant')) {
@@ -130,21 +138,6 @@ export function parseConversation(md: string): ChatMessage[] {
 	}
 	flush();
 	return messages;
-}
-
-export async function ensureFolder(app: App, folder: string): Promise<void> {
-	const parts = normalizePath(folder).split('/').filter(Boolean);
-	let cur = '';
-	for (const p of parts) {
-		cur = cur ? `${cur}/${p}` : p;
-		if (!app.vault.getAbstractFileByPath(cur)) {
-			try {
-				await app.vault.createFolder(cur);
-			} catch {
-				// ignore races / already-exists
-			}
-		}
-	}
 }
 
 /** Write (or overwrite) the conversation transcript at `path`. */

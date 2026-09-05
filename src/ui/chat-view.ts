@@ -27,6 +27,7 @@ import { ImportModal } from './import-modal';
 import { WorkflowModal, WorkflowStart } from './workflow-modal';
 import { WorkflowRun, createRunNote } from '../workflows/runner';
 import { prepareContext, stripPrePass } from '../prepass';
+import { Expansion, expandWikilinks } from '../wikilinks';
 import { Filing, suggestFiling } from '../filing';
 import { buildOpenFilesBlock, stripOpenFiles } from '../tools/workspace';
 import { AssistantTurn } from './assistant-turn';
@@ -43,6 +44,7 @@ import {
 	addUserBubble,
 	markPreviewApplied,
 	prettyJson,
+	addInlinedNote,
 } from './message-render';
 
 export const VIEW_TYPE_CHAT = 'vault-assistant-view';
@@ -51,6 +53,32 @@ const PLACEHOLDER = 'Ask about your vault…  (Enter to send, Shift+Enter for ne
 
 /** How close to the bottom still counts as "following the output", in pixels. */
 const FOLLOW_SLACK = 32;
+
+/** The `↘ …` lines under a user bubble: what was attached, and what was not. */
+function describeExpansion(e: Expansion): string[] {
+	const lines: string[] = [];
+	if (e.inlined.length) {
+		const chars = e.inlined.reduce((n, i) => n + i.chars, 0);
+		const names = e.inlined.map((i) => `${i.path}${i.link.includes('#') ? `#${i.link.split('#')[1] ?? ''}` : ''}`);
+		lines.push(`inlined ${names.join(' · ')} (${(chars / 1000).toFixed(1)}k)`);
+	}
+	for (const m of e.missed) {
+		lines.push(
+			m.near
+				? `[[${m.link}]] matched no note — did you mean ${m.near}?`
+				: `[[${m.link}]] matched no note`,
+		);
+	}
+	if (e.blocked.length) {
+		lines.push(
+			e.blocked.length === 1
+				? '1 link is in a blocked folder — not attached'
+				: `${e.blocked.length} links are in blocked folders — not attached`,
+		);
+	}
+	if (e.deferred.length) lines.push(`${e.deferred.length} more linked, not attached (message budget)`);
+	return lines;
+}
 
 export class ChatView extends ItemView {
 	private plugin: VaultAssistantPlugin;
@@ -115,6 +143,15 @@ export class ChatView extends ItemView {
 		const root = this.contentEl;
 		root.empty();
 		root.addClass('vault-assistant');
+
+		// The agent can move notes now, and the open conversation's transcript
+		// is a note like any other. Without this the panel keeps saving to the
+		// path the file left, quietly forking the user's history in two.
+		this.registerEvent(
+			this.app.vault.on('rename', (file, oldPath) => {
+				if (this.conversationPath === oldPath) this.conversationPath = file.path;
+			}),
+		);
 
 		const header = root.createDiv({ cls: 'va-header' });
 		header.createEl('span', { text: 'Vault assistant', cls: 'va-title' });
@@ -498,7 +535,17 @@ export class ChatView extends ItemView {
 			const head = card.createDiv({ cls: 'va-approval-head' });
 			setIcon(head.createSpan({ cls: 'va-approval-icon' }), 'shield-alert');
 			head.createSpan({ text: req.kind === 'mcp' ? ' External tool call' : ' Approval required' });
-			if (req.kind === 'mcp') {
+			if (req.kind === 'move' || req.kind === 'create-folder') {
+				card.createDiv({
+					cls: 'va-approval-body',
+					text:
+						req.kind === 'move'
+							? `The agent wants to move something outside your allowed folders (via ${req.tool}):`
+							: `The agent wants to create a folder outside your allowed folders (via ${req.tool}):`,
+				});
+				const line = card.createEl('code', { cls: 'va-approval-path' });
+				line.setText(req.kind === 'move' ? `${req.path ?? ''}  →  ${req.toPath ?? ''}` : (req.path ?? ''));
+			} else if (req.kind === 'mcp') {
 				card.createDiv({
 					cls: 'va-approval-body',
 					text: `The agent wants to call an external MCP tool on "${req.serverName}":`,
@@ -542,7 +589,8 @@ export class ChatView extends ItemView {
 			if (req.kind === 'mcp') {
 				addBtn(`Always trust ${req.serverName}`, 'always-trust', 'va-always');
 			} else {
-				addBtn('Always: this file', 'always-file', 'va-always');
+				// "This file" means nothing when the thing being made IS a folder.
+				if (req.kind !== 'create-folder') addBtn('Always: this file', 'always-file', 'va-always');
 				if (req.folder) addBtn(`Always: ${req.folder}/`, 'always-folder', 'va-always');
 			}
 
@@ -658,14 +706,30 @@ export class ChatView extends ItemView {
 
 		this.inputEl.value = '';
 		fitToContent(this.inputEl);
-		this.history.push({ role: 'user', content: text });
-		addUserBubble(this.messagesEl, text);
+		const bubble = addUserBubble(this.messagesEl, text);
 		this.scrollToBottom(true);
 
+		// Busy before the first await, not after: expanding links reads notes,
+		// and until this is set a second Enter re-enters send() and sends the
+		// same turn twice.
 		const abort = new AbortController();
 		this.abort = abort;
 		this.setBusy(true);
 		this.setStatus('Thinking…');
+
+		// A [[link]] the user typed is an unambiguous "this note, please", so it
+		// is resolved here and attached to the message rather than costing the
+		// agent a tool round. It goes into history, not the system prompt: the
+		// note is still the subject several turns later, and a reopened
+		// transcript has to give the model the context it had the first time.
+		const expansion = this.plugin.settings.expandTypedLinks
+			? await expandWikilinks(this.app, this.plugin.settings, text, this.linkSourcePath())
+			: null;
+		if (expansion) {
+			addInlinedNote(bubble, describeExpansion(expansion));
+			this.scrollToBottom();
+		}
+		this.history.push({ role: 'user', content: text + (expansion?.block ?? '') });
 
 		const system = this.history[0];
 		if (system?.role === 'system') {
@@ -742,6 +806,17 @@ export class ChatView extends ItemView {
 		this.abort = null;
 		this.setStatus(null);
 		this.setBusy(false);
+	}
+
+	/**
+	 * The note a typed [[link]] resolves against, so it lands where it would if
+	 * written in the note the user is looking at. Empty when "See what you have
+	 * open" is off: that setting means the panel does not use what is open, and
+	 * quietly using it for link resolution would route around it.
+	 */
+	private linkSourcePath(): string {
+		if (!this.plugin.settings.useOpenFiles) return '';
+		return this.app.workspace.getActiveFile()?.path ?? '';
 	}
 
 	/** The message that opened this conversation — what names and files it. */

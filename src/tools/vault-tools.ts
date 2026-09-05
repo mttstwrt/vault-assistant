@@ -8,6 +8,24 @@ import { buildWikiIndex, describeLinks, wikiHomePath } from './graph';
 import { describeOpenFiles } from './workspace';
 import { normalizeArgs, redirectTool } from './aliases';
 import { findFolder, findNote, notFoundMessage, toVaultPath } from './paths';
+import { SearchOptions, renderHits, runSearch } from './search';
+import {
+	SectionRange,
+	describeOutline,
+	isBlockRef,
+	noSuchSection,
+	sectionRange,
+	spliceSection,
+	splitSubpath,
+} from './sections';
+import { describeTags } from './tags';
+import { describeCapabilities } from './capabilities';
+import {
+	blockedChild,
+	ensureFolder,
+	moveThroughObsidian,
+	resolveDestination,
+} from './files';
 
 /** Everything a tool invocation needs: the app, settings, and the approval hooks. */
 export interface ToolContext {
@@ -31,15 +49,25 @@ export interface ToolContext {
 
 export const TOOL_SPECS: ToolSpec[] = [
 	{
+		name: 'capabilities',
+		description:
+			"What you can actually do in this vault: the tools you have this turn and what each really does, which folders you may read and write, how Obsidian itself will behave (whether links follow a moved note, above all), and what is genuinely impossible here. Read from live settings, not from memory. Call it BEFORE telling the user you can or cannot do something, and before any operation whose consequences you are unsure of.",
+		parameters: { type: 'object', properties: {} },
+	},
+	{
 		name: 'list_files',
 		description:
-			'List the files and folders directly inside a vault folder. Use an empty or omitted path for the vault root.',
+			'List the files and folders inside a vault folder. Use an empty or omitted path for the vault root. Raise depth to see a whole subtree in one call instead of walking it level by level.',
 		parameters: {
 			type: 'object',
 			properties: {
 				path: {
 					type: 'string',
 					description: 'Folder path relative to the vault root. Empty/omitted = root.',
+				},
+				depth: {
+					type: 'number',
+					description: 'How many levels to descend. 1 (default) lists the folder itself; max 4.',
 				},
 			},
 		},
@@ -56,14 +84,97 @@ export const TOOL_SPECS: ToolSpec[] = [
 		},
 	},
 	{
-		name: 'search',
+		name: 'outline',
 		description:
-			'Full-text search across markdown notes. Returns matching file paths with short snippets.',
+			"A note's shape without its contents: its heading tree with line ranges, its frontmatter keys, and how many links and tags it has. Use it before read_file on anything long — then pull just the part you need with read_section.",
 		parameters: {
 			type: 'object',
 			properties: {
-				query: { type: 'string', description: 'Text to search for (case-insensitive).' },
-				limit: { type: 'number', description: 'Max results (default 20, max 50).' },
+				path: { type: 'string', description: 'File path relative to the vault root.' },
+			},
+			required: ['path'],
+		},
+	},
+	{
+		name: 'read_section',
+		description:
+			'Read one section of a note — a heading and everything under it, including its subheadings — instead of the whole file. Also reads a block reference ("#^blockid"). Resolved exactly the way Obsidian resolves [[note#heading]]. Prefer this to read_file whenever you know which part you want.',
+		parameters: {
+			type: 'object',
+			properties: {
+				path: {
+					type: 'string',
+					description: 'File path, optionally with the heading appended: "Notes/Ideas.md#Chunking".',
+				},
+				heading: {
+					type: 'string',
+					description: 'The heading to read, if not already appended to path. "^blockid" for a block.',
+				},
+			},
+			required: ['path'],
+		},
+	},
+	{
+		name: 'write_section',
+		description:
+			'Replace or extend the body of ONE heading section, leaving the rest of the note untouched. Use this rather than write_file whenever you are changing part of a note — write_file replaces the whole file and will lose everything you did not send. The heading line itself is never changed; "append" adds to the end of that section, before the next heading.',
+		parameters: {
+			type: 'object',
+			properties: {
+				path: {
+					type: 'string',
+					description: 'File path, optionally with the heading appended: "Notes/Ideas.md#Chunking".',
+				},
+				heading: { type: 'string', description: 'The heading to write under, if not appended to path.' },
+				content: { type: 'string', description: 'The new body for that section.' },
+				mode: {
+					type: 'string',
+					enum: ['replace', 'append'],
+					description: "'replace' (default) swaps the section body; 'append' adds to the end of it.",
+				},
+			},
+			required: ['path', 'content'],
+		},
+	},
+	{
+		name: 'tags',
+		description:
+			"With no argument: every tag in the vault and how many notes carry it. With a tag: the notes carrying it, children included (#project covers #project/active). Reads Obsidian's metadata, not note contents, so it is cheap — use it instead of searching for a '#word' string.",
+		parameters: {
+			type: 'object',
+			properties: {
+				tag: { type: 'string', description: 'Tag to look up, with or without the leading #. Omit to list all tags.' },
+				limit: { type: 'number', description: 'Max notes to name for one tag (default 40).' },
+			},
+		},
+	},
+	{
+		name: 'search',
+		description:
+			'Text search across markdown notes, grep-style: every hit is reported as "path:line: text", several per file where several exist. Supports regular expressions and the usual grep options. This is the tool a grep or ripgrep call means here. For a concept rather than a string use semantic_search; to read what a hit belongs to use read_section.',
+		parameters: {
+			type: 'object',
+			properties: {
+				query: { type: 'string', description: 'Text to find, or a regular expression when regex is true.' },
+				regex: {
+					type: 'boolean',
+					description: 'Treat query as a JavaScript regular expression (default false).',
+				},
+				path: {
+					type: 'string',
+					description: 'Only search inside this folder. Omit to search the whole vault.',
+				},
+				case_sensitive: { type: 'boolean', description: 'Default false (grep -i is the default here).' },
+				whole_word: { type: 'boolean', description: 'Match whole words only (grep -w).' },
+				invert: { type: 'boolean', description: 'Report lines that do NOT match (grep -v).' },
+				context: { type: 'number', description: 'Lines of context either side of a hit, 0-3 (grep -C).' },
+				multiline: {
+					type: 'boolean',
+					description: 'Match across line breaks rather than line by line. Slower; use only when the pattern needs it.',
+				},
+				files_only: { type: 'boolean', description: 'List matching file paths only (rg -l).' },
+				limit: { type: 'number', description: 'Max hits overall (default 20, max 100).' },
+				max_per_file: { type: 'number', description: 'Max hits per file (default 3).' },
 			},
 			required: ['query'],
 		},
@@ -92,6 +203,35 @@ export const TOOL_SPECS: ToolSpec[] = [
 				content: { type: 'string', description: 'Text to append.' },
 			},
 			required: ['path', 'content'],
+		},
+	},
+	{
+		name: 'move_file',
+		description:
+			"Move or rename a note or a folder. This goes through Obsidian itself, the same as dragging it in the file explorer, so [[links]] pointing at it are updated the way Obsidian updates them — and the result tells you whether they actually followed. Use it instead of writing a copy and abandoning the original. Needs write permission at both ends.",
+		parameters: {
+			type: 'object',
+			properties: {
+				path: { type: 'string', description: 'The note or folder to move, relative to the vault root.' },
+				to: {
+					type: 'string',
+					description:
+						'Where it goes. An existing folder means "move into it, keep the name"; anything else is the new full path.',
+				},
+			},
+			required: ['path', 'to'],
+		},
+	},
+	{
+		name: 'create_folder',
+		description:
+			'Create a folder, and any parent folders missing above it. Use this when a folder needs to exist — never create a placeholder note to bring one into being.',
+		parameters: {
+			type: 'object',
+			properties: {
+				path: { type: 'string', description: 'Folder path relative to the vault root.' },
+			},
+			required: ['path'],
 		},
 	},
 	{
@@ -200,20 +340,32 @@ export function activeToolSpecs(settings: VaultAssistantSettings): ToolSpec[] {
 	return off.size ? TOOL_SPECS.filter((t) => !off.has(t.name)) : TOOL_SPECS;
 }
 
-/** Create a folder and any missing parents. */
-async function ensureFolder(app: App, folder: string): Promise<void> {
-	const parts = normalizePath(folder).split('/').filter(Boolean);
-	let cur = '';
-	for (const p of parts) {
-		cur = cur ? `${cur}/${p}` : p;
-		if (!app.vault.getAbstractFileByPath(cur)) {
-			try {
-				await app.vault.createFolder(cur);
-			} catch {
-				// Folder may already exist (race); ignore.
+/** How deep `list_files` will descend, and how many entries it will print. */
+const MAX_LIST_DEPTH = 4;
+const MAX_LIST_ENTRIES = 500;
+
+/**
+ * A folder's contents, up to `depth` levels down. Paths stay vault-relative on
+ * every line even though indentation already shows the shape: a model copies a
+ * line straight into read_file, and a bare indented name would not resolve.
+ */
+function listFolder(folder: TFolder, settings: VaultAssistantSettings, depth: number): string[] {
+	const out: string[] = [];
+	const walk = (f: TFolder, level: number, indent: string): void => {
+		const children = [...f.children].sort((a, b) => a.path.localeCompare(b.path));
+		for (const c of children) {
+			if (out.length >= MAX_LIST_ENTRIES) return;
+			if (c instanceof TFolder) {
+				out.push(`${indent}${c.path}/`);
+				if (level < depth) walk(c, level + 1, `${indent}  `);
+			} else if (isReadable(c.path, settings)) {
+				out.push(`${indent}${c.path}`);
 			}
 		}
-	}
+	};
+	walk(folder, 1, '');
+	if (out.length >= MAX_LIST_ENTRIES) out.push(`…(stopped at ${MAX_LIST_ENTRIES} entries)`);
+	return out;
 }
 
 /** What a file holds right now, or '' when it doesn't exist yet. */
@@ -266,6 +418,73 @@ async function ensureWritable(
 		case 'deny':
 		default:
 			return `Error: writing to "${p}" is not permitted. Writable folders: ${displayScopes(writeScopes(ctx.settings))}.`;
+	}
+}
+
+/** The "you may not" message, naming what the agent may in fact touch. */
+function outOfScope(ctx: ToolContext, what: string): string {
+	return `Error: ${what} is not permitted. Writable folders: ${displayScopes(writeScopes(ctx.settings))}.`;
+}
+
+/**
+ * Gate a move. Both ends need write permission, and the user is asked once for
+ * the move rather than twice for its halves — approving the removal but not the
+ * arrival is not a state anyone wants to be in.
+ */
+async function ensureMovable(ctx: ToolContext, from: string, to: string): Promise<string | null> {
+	const ok = (p: string): boolean =>
+		isWritable(p, ctx.settings) || ctx.sessionWrites.has(p);
+	if (ok(from) && ok(to)) return null;
+
+	const decision = await ctx.requestApproval({
+		kind: 'move',
+		tool: 'move_file',
+		path: from,
+		toPath: to,
+		folder: parentFolder(to),
+	});
+	switch (decision) {
+		case 'once':
+			return null;
+		case 'session':
+			ctx.sessionWrites.add(from);
+			ctx.sessionWrites.add(to);
+			return null;
+		case 'always-file':
+			ctx.settings.writePaths.push(from, to);
+			await ctx.saveSettings();
+			return null;
+		case 'always-folder':
+			ctx.settings.writePaths.push(parentFolder(from) || from, parentFolder(to) || to);
+			await ctx.saveSettings();
+			return null;
+		default:
+			return outOfScope(ctx, `moving "${from}" to "${to}"`);
+	}
+}
+
+/** Gate a folder creation: no contents, but still a directory in someone's vault. */
+async function ensureFolderAllowed(ctx: ToolContext, path: string): Promise<string | null> {
+	if (isWritable(path, ctx.settings) || ctx.sessionWrites.has(path)) return null;
+
+	const decision = await ctx.requestApproval({
+		kind: 'create-folder',
+		tool: 'create_folder',
+		path,
+		folder: parentFolder(path),
+	});
+	switch (decision) {
+		case 'once':
+			return null;
+		case 'session':
+			ctx.sessionWrites.add(path);
+			return null;
+		case 'always-folder':
+			ctx.settings.writePaths.push(parentFolder(path) || path);
+			await ctx.saveSettings();
+			return null;
+		default:
+			return outOfScope(ctx, `creating the folder "${path}"`);
 	}
 }
 
@@ -324,6 +543,42 @@ async function doWrite(ctx: ToolContext, path: string, content: string): Promise
 	return `Created ${p}`;
 }
 
+/**
+ * Change a file through Vault.process, which re-reads and writes under
+ * Obsidian's own lock — so an edit the user makes in the note while the agent
+ * is deciding what to write is not silently discarded, which is what a
+ * read-then-modify pair does. `compute` returns the new text, or null to leave
+ * the file alone; the return value says whether anything was written.
+ */
+async function processWrite(
+	ctx: ToolContext,
+	file: TFile,
+	compute: (current: string) => string | null,
+): Promise<boolean> {
+	let before = '';
+	let after: string | null = null;
+	await ctx.app.vault.process(file, (cur) => {
+		before = cur;
+		after = compute(cur);
+		return after ?? cur;
+	});
+	if (after === null) return false;
+	ctx.onFileChange?.({ path: file.path, kind: 'update', before, after });
+	return true;
+}
+
+/**
+ * Append to a file atomically, creating it when it does not exist yet. The
+ * concatenation happens inside process(), so it lands on whatever the note
+ * holds at write time rather than on a copy read moments earlier.
+ */
+async function appendTo(ctx: ToolContext, path: string, addition: string): Promise<string> {
+	const existing = ctx.app.vault.getAbstractFileByPath(path);
+	if (!(existing instanceof TFile)) return await doWrite(ctx, path, addition);
+	await processWrite(ctx, existing, (cur) => `${cur}${addition}`);
+	return `Appended to ${path}`;
+}
+
 /** Permission-checked create/overwrite. */
 async function writeFile(
 	ctx: ToolContext,
@@ -334,6 +589,45 @@ async function writeFile(
 	const denied = await ensureWritable(ctx, tool, path, content);
 	if (denied) return denied;
 	return doWrite(ctx, path, content);
+}
+
+/** The heading a caller passed separately, normalised to a "#…" subpath. */
+function headingArg(args: Record<string, unknown>): string {
+	const raw = str(args.heading).trim();
+	if (!raw) return '';
+	return raw.startsWith('#') ? raw : `#${raw}`;
+}
+
+interface SectionTarget {
+	file: TFile;
+	text: string;
+	range: SectionRange;
+	/** The "#heading" or "#^block" this resolved, however the caller spelled it. */
+	subpath: string;
+}
+
+/**
+ * Resolve the (file, section) a read_section/write_section call names, taking
+ * the heading either appended to the path or as its own argument — models
+ * write both and neither is wrong. Returns an error string to hand back when
+ * the note or the heading does not resolve.
+ */
+async function resolveSection(
+	app: App,
+	settings: VaultAssistantSettings,
+	args: Record<string, unknown>,
+): Promise<SectionTarget | string> {
+	const { path, subpath } = splitSubpath(str(args.path));
+	const found = findNote(app, settings, path);
+	if (!found.file) return notFoundMessage(found);
+	const file = found.file;
+	const wanted = subpath || headingArg(args);
+	if (!wanted) {
+		return `Error: which section of ${file.path}? Pass a heading, or call outline to see them.`;
+	}
+	const text = await app.vault.cachedRead(file);
+	const range = sectionRange(app, file, wanted, text.length);
+	return range ? { file, text, range, subpath: wanted } : noSuchSection(app, file, wanted);
 }
 
 /** Coerce an unknown tool argument to a string safely. */
@@ -372,14 +666,19 @@ export async function executeTool(
 
 	try {
 		switch (name) {
+			case 'capabilities':
+				return await describeCapabilities(
+					app,
+					settings,
+					offered ?? new Set(activeToolSpecs(settings).map((t) => t.name)),
+				);
+
 			case 'list_files': {
 				const raw = typeof args.path === 'string' ? args.path : '';
 				const folder = findFolder(app, raw);
 				if (!folder) return `Error: no folder "${toVaultPath(app, raw)}" in the vault.`;
-				const lines = folder.children
-					.filter((c) => c instanceof TFolder || isReadable(c.path, settings))
-					.map((c) => (c instanceof TFolder ? `${c.path}/` : c.path))
-					.sort();
+				const depth = Math.min(Math.max(Math.round(Number(args.depth) || 1), 1), MAX_LIST_DEPTH);
+				const lines = listFolder(folder, settings, depth);
 				return lines.length ? lines.join('\n') : '(empty folder)';
 			}
 
@@ -392,25 +691,70 @@ export async function executeTool(
 			}
 
 			case 'search': {
-				const q = str(args.query).toLowerCase();
-				if (!q) return 'Error: a query is required.';
-				const limit = Math.min(Math.max(Number(args.limit) || 20, 1), 50);
-				const results: string[] = [];
-				for (const file of app.vault.getMarkdownFiles()) {
-					if (!isReadable(file.path, settings)) continue;
-					const text = await app.vault.cachedRead(file);
-					const idx = text.toLowerCase().indexOf(q);
-					if (idx >= 0) {
-						const snippet = text
-							.slice(Math.max(0, idx - 40), idx + 80)
-							.replace(/\s+/g, ' ')
-							.trim();
-						results.push(`${file.path}: …${snippet}…`);
-						if (results.length >= limit) break;
-					}
-				}
-				return results.length ? results.join('\n') : 'No matches found.';
+				const query = str(args.query);
+				if (!query) return 'Error: a query is required.';
+				const opts: SearchOptions = {
+					query,
+					regex: args.regex === true,
+					caseSensitive: args.case_sensitive === true,
+					wholeWord: args.whole_word === true,
+					invert: args.invert === true,
+					multiline: args.multiline === true,
+					filesOnly: args.files_only === true,
+					scope: args.path ? toVaultPath(app, str(args.path)) : '',
+					limit: Math.min(Math.max(Number(args.limit) || 20, 1), 100),
+					maxPerFile: Math.min(Math.max(Number(args.max_per_file) || 3, 1), 20),
+					context: Math.min(Math.max(Math.round(Number(args.context) || 0), 0), 3),
+				};
+				const hits = await runSearch(app, settings, opts);
+				return typeof hits === 'string' ? hits : renderHits(hits, opts);
 			}
+
+			case 'outline': {
+				const found = findNote(app, settings, splitSubpath(str(args.path)).path);
+				if (!found.file) return notFoundMessage(found);
+				return describeOutline(app, found.file, await app.vault.cachedRead(found.file));
+			}
+
+			case 'read_section': {
+				const target = await resolveSection(app, settings, args);
+				if (typeof target === 'string') return target;
+				const { file, text, range, subpath } = target;
+				return `${file.path}${subpath}\n\n${text.slice(range.start, range.end).trim()}`;
+			}
+
+			case 'write_section': {
+				const target = await resolveSection(app, settings, args);
+				if (typeof target === 'string') return target;
+				const { file, text, range, subpath } = target;
+				if (isBlockRef(subpath)) {
+					return `Error: write_section edits heading sections, not block references. To change a block, edit the section it sits in, or use write_file.`;
+				}
+				const mode = str(args.mode) === 'append' ? 'append' : 'replace';
+				const after = spliceSection(text, range, str(args.content), mode);
+				const denied = await ensureWritable(ctx, 'write_section', file.path, after);
+				if (denied) return denied;
+				// The offsets came from the metadata cache, so they only describe
+				// the text they were resolved against. process() runs under
+				// Obsidian's own lock: if the note moved underneath us, splicing
+				// at stale offsets would corrupt it, so the write is abandoned
+				// and the model is told to look again. Refusing beats guessing.
+				const applied = await processWrite(ctx, file, (cur) =>
+					cur === text ? after : null,
+				);
+				if (!applied) {
+					return `Error: ${file.path} changed while this edit was being prepared — nothing was written. Read the section again and retry.`;
+				}
+				return `Updated ${file.path}${subpath}`;
+			}
+
+			case 'tags':
+				return describeTags(
+					app,
+					settings,
+					str(args.tag),
+					Math.min(Math.max(Number(args.limit) || 40, 1), 200),
+				);
 
 			case 'write_file':
 				return await writeFile(
@@ -423,12 +767,53 @@ export async function executeTool(
 			case 'append_file': {
 				const p = toVaultPath(app, str(args.path));
 				const existing = app.vault.getAbstractFileByPath(p);
-				const cur = existing instanceof TFile ? await app.vault.read(existing) : null;
-				const after = (cur ?? '') + str(args.content);
-				const denied = await ensureWritable(ctx, 'append_file', p, after);
+				const cur = existing instanceof TFile ? await app.vault.cachedRead(existing) : null;
+				// The preview is what the approval card shows; the write itself
+				// re-reads inside process(), so it appends to whatever the note
+				// holds by then rather than to this copy.
+				const denied = await ensureWritable(ctx, 'append_file', p, (cur ?? '') + str(args.content));
 				if (denied) return denied;
-				await doWrite(ctx, p, after);
-				return cur === null ? `Created ${p}` : `Appended to ${p}`;
+				return await appendTo(ctx, p, str(args.content));
+			}
+
+			case 'move_file': {
+				const found = findNote(app, settings, str(args.path));
+				// A folder is not a note, so findNote misses one; try that next.
+				const source =
+					found.file ?? findFolder(app, str(args.path)) ?? null;
+				if (!source) return notFoundMessage(found);
+
+				const hidden = blockedChild(source, settings);
+				if (hidden) return hidden;
+
+				// The raw string, not a normalized one: resolveDestination reads the
+				// trailing slash, which normalizing removes.
+				const to = resolveDestination(app, source, str(args.to));
+				if (to === source.path) return `Error: ${source.path} is already there.`;
+				if (app.vault.getAbstractFileByPath(to)) {
+					return `Error: "${to}" already exists. Pick another name, or move the existing one first.`;
+				}
+
+				// A move is a removal at one end and a creation at the other, so
+				// it needs permission at both — asked once, for the whole move.
+				const denied = await ensureMovable(ctx, source.path, to);
+				if (denied) return denied;
+
+				const parent = parentFolder(to);
+				if (parent) await ensureFolder(app, parent);
+				return await moveThroughObsidian(app, source, to);
+			}
+
+			case 'create_folder': {
+				const p = toVaultPath(app, str(args.path));
+				if (!p) return 'Error: a folder path is required.';
+				const existing = app.vault.getAbstractFileByPath(p);
+				if (existing instanceof TFolder) return `${p} already exists.`;
+				if (existing) return `Error: "${p}" is a file, not a folder.`;
+				const denied = await ensureFolderAllowed(ctx, p);
+				if (denied) return denied;
+				await ensureFolder(app, p);
+				return `Created folder ${p}`;
 			}
 
 			case 'remember': {
@@ -441,11 +826,10 @@ export async function executeTool(
 				if (!content.trim()) return 'Error: memory content is required.';
 				const existing = app.vault.getAbstractFileByPath(path);
 				if (str(args.mode) !== 'replace' && existing instanceof TFile) {
-					const cur = await app.vault.read(existing);
-					const after = `${cur.trimEnd()}\n\n${content}`;
-					const denied = await ensureWritable(ctx, 'remember', path, after);
+					const cur = await app.vault.cachedRead(existing);
+					const denied = await ensureWritable(ctx, 'remember', path, `${cur.trimEnd()}\n\n${content}`);
 					if (denied) return denied;
-					await doWrite(ctx, path, after);
+					await processWrite(ctx, existing, (fresh) => `${fresh.trimEnd()}\n\n${content}`);
 					return `Remembered (appended to ${path}).`;
 				}
 				await writeFile(ctx, 'remember', path, content);
@@ -504,11 +888,10 @@ export async function executeTool(
 				const content = str(args.content);
 				const existing = app.vault.getAbstractFileByPath(path);
 				if (str(args.mode) === 'append' && existing instanceof TFile) {
-					const cur = await app.vault.read(existing);
-					const after = `${cur}\n\n${content}`;
-					const denied = await ensureWritable(ctx, 'update_wiki', path, after);
+					const cur = await app.vault.cachedRead(existing);
+					const denied = await ensureWritable(ctx, 'update_wiki', path, `${cur}\n\n${content}`);
 					if (denied) return denied;
-					await doWrite(ctx, path, after);
+					await processWrite(ctx, existing, (fresh) => `${fresh}\n\n${content}`);
 					return `Appended to ${path}`;
 				}
 				return await writeFile(ctx, 'update_wiki', path, content);

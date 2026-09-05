@@ -11,7 +11,7 @@ export function inFolder(path: string, folder: string): boolean {
 }
 
 /** Invert the metadata cache into a target → sources backlink map. */
-function buildBacklinks(app: App): Record<string, string[]> {
+export function buildBacklinks(app: App): Record<string, string[]> {
 	const resolved = app.metadataCache.resolvedLinks;
 	const back: Record<string, string[]> = {};
 	for (const src of Object.keys(resolved)) {

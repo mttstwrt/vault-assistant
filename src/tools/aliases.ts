@@ -40,6 +40,13 @@ const READ_ALIASES: Record<string, string> = {
 	find_in_files: 'search',
 	text_search: 'search',
 	full_text_search: 'search',
+	find: 'search',
+
+	head: 'read_file',
+	tail: 'read_file',
+	sed: 'read_file',
+	tree: 'list_files',
+	find_files: 'list_files',
 };
 
 /** Names that would change something. Corrected, never guessed at. */
@@ -62,6 +69,16 @@ const WRITE_ALIASES: Record<string, string> = {
 	add_to_file: 'append_file',
 	create_note: 'update_wiki',
 	create_page: 'update_wiki',
+
+	move: 'move_file',
+	mv: 'move_file',
+	rename: 'move_file',
+	rename_file: 'move_file',
+	move_note: 'move_file',
+	mkdir: 'create_folder',
+	create_directory: 'create_folder',
+	make_directory: 'create_folder',
+	new_folder: 'create_folder',
 };
 
 /** Shell-shaped names: there is nothing to run them with. */
@@ -90,23 +107,23 @@ const SHELL_NAMES = new Set([
 	'code_interpreter',
 ]);
 
-/** File operations this plugin deliberately does not offer. */
+/**
+ * File operations this plugin deliberately does not offer. Moving, renaming and
+ * folder creation used to be on this list; they are real tools now, and a
+ * confidently wrong correction is worse than none — it is what sent a model
+ * building folders out of placeholder notes.
+ */
 const UNSUPPORTED = new Set([
 	'delete_file',
 	'delete',
 	'rm',
 	'remove_file',
 	'unlink',
-	'move_file',
-	'move',
-	'mv',
-	'rename_file',
-	'rename',
+	'trash',
 	'copy_file',
+	'copy',
 	'cp',
-	'mkdir',
-	'create_directory',
-	'create_folder',
+	'duplicate_file',
 ]);
 
 /** Argument names other harnesses use for the ones our tools take. */
@@ -144,6 +161,16 @@ const ARG_ALIASES: Record<string, string> = {
 	page: 'title',
 	page_title: 'title',
 
+	destination: 'to',
+	new_path: 'to',
+	target: 'to',
+	to_path: 'to',
+	dest: 'to',
+
+	section: 'heading',
+	header: 'heading',
+	heading_title: 'heading',
+
 	max_results: 'limit',
 	top_k: 'limit',
 	k: 'limit',
@@ -178,7 +205,7 @@ export interface ToolRedirect {
 }
 
 /** The tools that read the vault, named for the correction messages. */
-const READ_TOOLS = 'list_files, read_file, search';
+const READ_TOOLS = 'list_files, read_file, outline, read_section, search, tags';
 
 /**
  * Work out what a model meant by a tool this plugin doesn't have.
@@ -193,17 +220,25 @@ export function redirectTool(name: string, available: Set<string>): ToolRedirect
 	const read = READ_ALIASES[canonical];
 	if (read && available.has(read)) return { run: read };
 
+	/** How to call the tool a familiar write-shaped name should have been. */
+	const WRITE_HINTS: Record<string, string> = {
+		write_file:
+			'arguments: path, content — it replaces the whole file, so read_file first and send the full new text, or use write_section to change one heading',
+		append_file: 'arguments: path, content',
+		update_wiki: 'arguments: title, content',
+		move_file: 'arguments: path, to — it moves through Obsidian, so links follow',
+		create_folder: 'arguments: path',
+	};
+
 	const write = WRITE_ALIASES[canonical];
 	if (write) {
+		const structural = write === 'move_file' || write === 'create_folder';
+		const verb = structural ? 'To rearrange this vault use' : 'To change a note in this vault use';
 		return {
 			message:
-				`There is no "${name}" tool. To change a note in this vault use ${write}` +
-				(write === 'write_file'
-					? ' (arguments: path, content — it replaces the whole file, so read_file first and send the full new text)'
-					: write === 'append_file'
-						? ' (arguments: path, content)'
-						: ' (arguments: title, content)') +
-				`. Paths are relative to the vault root, e.g. "Notes/Ideas.md".`,
+				`There is no "${name}" tool. ${verb} ${write}` +
+				` (${WRITE_HINTS[write] ?? 'see its description'}).` +
+				` Paths are relative to the vault root, e.g. "Notes/Ideas.md".`,
 		};
 	}
 
@@ -211,15 +246,17 @@ export function redirectTool(name: string, available: Set<string>): ToolRedirect
 		return {
 			message:
 				`There is no shell here and no "${name}" tool: this is an Obsidian vault, not a filesystem you can run commands against. ` +
-				`Use the vault tools instead — ${READ_TOOLS} to look around, write_file/append_file to change a note. Paths are relative to the vault root.`,
+				`Use the vault tools instead — ${READ_TOOLS} to look around, write_file/write_section/append_file to change a note, move_file and create_folder to rearrange it. Paths are relative to the vault root.`,
 		};
 	}
 
 	if (UNSUPPORTED.has(canonical)) {
 		return {
 			message:
-				`There is no "${name}" tool: this plugin cannot delete, move, copy or rename files. ` +
-				`Tell the user what you would like changed and let them do it in Obsidian. To add or edit content, use write_file or append_file.`,
+				`There is no "${name}" tool: this plugin cannot delete or copy files. ` +
+				`Tell the user what you would like removed and let them do it in Obsidian. ` +
+				`It can move and rename (move_file), create folders (create_folder), and add or edit content ` +
+				`(write_file, append_file, write_section).`,
 		};
 	}
 

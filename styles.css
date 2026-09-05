@@ -614,3 +614,12 @@
 	font-size: var(--font-smallest);
 	font-style: italic;
 }
+
+/* What the [[link]] expander attached to a message, under its bubble. */
+.va-inlined {
+	margin-top: 6px;
+	padding-top: 6px;
+	border-top: 1px solid var(--background-modifier-border);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+}

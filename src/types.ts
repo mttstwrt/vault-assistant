@@ -30,12 +30,19 @@ export interface FileChange {
 
 /** A request to the user to approve an out-of-scope action. */
 export interface ApprovalRequest {
-	/** What kind of action needs approval. */
-	kind: 'write' | 'mcp';
+	/**
+	 * What kind of action needs approval. 'move' and 'create-folder' are their
+	 * own kinds rather than writes because neither has a content diff to show,
+	 * and rendering one as a write would draw a whole-file deletion that is not
+	 * happening.
+	 */
+	kind: 'write' | 'mcp' | 'move' | 'create-folder';
 	/** The tool that wants to act (e.g. "write_file", "mcp__fs__read_file"). */
 	tool: string;
 	/** The target file path, relative to the vault root. Write requests only. */
 	path?: string;
+	/** Where a move would land. Move requests only. */
+	toPath?: string;
 	/** The target file's parent folder, for "always allow this folder". Write requests only. */
 	folder?: string;
 	/**

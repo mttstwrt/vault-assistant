@@ -73,6 +73,12 @@ export interface VaultAssistantSettings {
 	 * Blocked folders are never listed.
 	 */
 	useOpenFiles: boolean;
+	/**
+	 * Resolve [[links]] the user types in the chat box and attach the note (or
+	 * the #section) to their message, so the agent does not spend a tool round
+	 * fetching what they already named. Blocked folders are never attached.
+	 */
+	expandTypedLinks: boolean;
 
 	// --- Folder permissions ---
 	readBlockPaths: string[];
@@ -197,6 +203,7 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	systemPrompt: DEFAULT_SYSTEM_PROMPT,
 	usePrePass: false,
 	useOpenFiles: true,
+	expandTypedLinks: true,
 	readBlockPaths: [],
 	writePaths: [],
 	conversationsFolder: 'AI/Conversations',
@@ -690,6 +697,18 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(s.useOpenFiles).onChange(async (v) => {
 					s.useOpenFiles = v;
+					await this.save();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName('Expand [[links]] you type')
+			.setDesc(
+				'Resolve [[note]] and [[note#section]] in your message and attach the text before sending, so the agent does not spend a tool round fetching what you just named. Typing the filename is enough — no folder path. Notes in blocked folders are never attached.',
+			)
+			.addToggle((t) =>
+				t.setValue(s.expandTypedLinks).onChange(async (v) => {
+					s.expandTypedLinks = v;
 					await this.save();
 				}),
 			);
