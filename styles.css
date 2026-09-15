@@ -38,7 +38,7 @@
 	text-overflow: ellipsis;
 }
 
-.va-new {
+.va-header-btn {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
@@ -48,7 +48,7 @@
 	cursor: pointer;
 	color: var(--text-muted);
 }
-.va-new:hover {
+.va-header-btn:hover {
 	color: var(--text-normal);
 }
 
@@ -207,6 +207,16 @@
 
 .va-assistant .va-content {
 	background: var(--background-secondary);
+}
+
+/* Paths the panel prints itself. Obsidian already styles a.internal-link, so
+   this only adds the wrapping a long path needs in a narrow sidebar — and
+   keeps the plain-text case (a note that does not exist yet) readable. */
+.va-path {
+	word-break: break-all;
+}
+span.va-path {
+	color: var(--text-muted);
 }
 
 .va-info {
@@ -376,6 +386,10 @@
 	border-radius: 6px;
 	font-size: var(--font-smallest);
 	word-break: break-all;
+}
+.va-approval-path .va-path {
+	font-family: inherit;
+	font-size: inherit;
 }
 .va-approval-actions {
 	display: flex;

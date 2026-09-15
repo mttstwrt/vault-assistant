@@ -23,6 +23,15 @@ interface Connection {
 	transport: McpTransport;
 }
 
+/** What a connected server contributed, for the settings tab to report. */
+export interface McpServerStatus {
+	id: string;
+	name: string;
+	trusted: boolean;
+	/** Tool names this server contributed, namespaced as the model sees them. */
+	tools: string[];
+}
+
 /**
  * Owns every MCP server connection and exposes their tools to the agent: it
  * lists them as namespaced ToolSpecs (`mcp__<serverId>__<tool>`) and routes
@@ -86,6 +95,26 @@ export class McpManager {
 	/** Namespaced specs for every connected MCP tool. */
 	toolSpecs(): ToolSpec[] {
 		return [...this.tools.values()].map((t) => t.spec);
+	}
+
+	/**
+	 * What is connected right now, and what each server brought.
+	 *
+	 * Connecting reports its failures as notices at startup, which is exactly
+	 * when nobody is looking; without this, a server that is enabled but not
+	 * actually answering is indistinguishable from one that is, until the model
+	 * fails to call a tool nobody knew was missing.
+	 */
+	status(): McpServerStatus[] {
+		return [...this.connections.values()].map(({ cfg }) => ({
+			id: cfg.id,
+			name: cfg.name,
+			trusted: cfg.trusted,
+			tools: [...this.tools.values()]
+				.filter((t) => t.serverId === cfg.id)
+				.map((t) => t.spec.name)
+				.sort(),
+		}));
 	}
 
 	/** The server config behind a namespaced tool name (same object as in settings). */

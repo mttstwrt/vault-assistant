@@ -299,10 +299,15 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 			const models = filterModels(this.discovered.get(url) ?? [], kind);
 			const current = opts.current();
 
-			if (models.length > 1) {
+			// One control whatever the endpoint serves. A single detected model
+			// used to get a "Use it" button and no list, which is a second way to
+			// do the same thing and leaves nothing to pick from once it is used.
+			if (models.length) {
 				new Setting(container)
-					.setName(kind === 'chat' ? 'Available models' : 'Available embedding models')
-					.setDesc(`${models.length} models detected at ${url}.`)
+					.setName(kind === 'chat' ? 'Detected models' : 'Detected embedding models')
+					.setDesc(
+						`${models.length} model${models.length === 1 ? '' : 's'} detected at ${url}.`,
+					)
 					.addDropdown((d) => {
 						// Keep a hand-typed name selectable, so picking from the
 						// list is never a one-way door.
@@ -315,19 +320,6 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 							render();
 						});
 					});
-			} else if (models.length === 1) {
-				const only = models[0]?.id ?? '';
-				const row = new Setting(container)
-					.setName(kind === 'chat' ? 'Available model' : 'Available embedding model')
-					.setDesc(`The endpoint serves one model: ${only}`);
-				if (only !== current) {
-					row.addButton((b) =>
-						b.setButtonText('Use it').onClick(async () => {
-							await opts.apply(only);
-							render();
-						}),
-					);
-				}
 			}
 
 			const state = this.discoveryState.get(url);
@@ -1093,12 +1085,45 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 				});
 			});
 
+		const mcpStatus = containerEl.createDiv({ cls: 'va-rag-status' });
+		const showMcpStatus = (): void => {
+			mcpStatus.empty();
+			const connected = this.plugin.mcp.status();
+			const enabled = s.mcpServers.filter((server) => server.enabled).length;
+			if (!enabled) {
+				mcpStatus.setText('No servers enabled.');
+				return;
+			}
+			for (const server of connected) {
+				mcpStatus.createDiv({
+					text:
+						`${server.name}: connected, ${server.tools.length} tool(s)` +
+						`${server.trusted ? ' · trusted (no approval prompt)' : ''}` +
+						`${server.tools.length ? ` — ${server.tools.join(', ')}` : ''}`,
+				});
+			}
+			const failed = enabled - connected.length;
+			if (failed > 0) {
+				mcpStatus.createDiv({
+					text: `${failed} enabled server(s) are not connected. Reconnect to see why.`,
+				});
+			}
+		};
+		showMcpStatus();
+
 		new Setting(containerEl)
 			.setName('Reconnect servers')
-			.setDesc('Apply server changes by reconnecting now.')
+			.setDesc('Apply server changes by reconnecting now, and report what answered.')
 			.addButton((b) =>
 				b.setButtonText('Reconnect').onClick(async () => {
-					await this.plugin.reconnectMcp();
+					b.setDisabled(true);
+					mcpStatus.setText('Connecting…');
+					try {
+						await this.plugin.reconnectMcp();
+					} finally {
+						b.setDisabled(false);
+						showMcpStatus();
+					}
 				}),
 			);
 

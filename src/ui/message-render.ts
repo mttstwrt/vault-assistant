@@ -1,8 +1,39 @@
 /** Rendering helpers shared by the chat panel and its streaming turns. */
-import { App, Component, MarkdownRenderer, Notice, setIcon } from 'obsidian';
+import { App, Component, MarkdownRenderer, Notice, TFile, setIcon } from 'obsidian';
 import { CallStats } from '../api/client';
 import { FileChange, ToolCall } from '../types';
+import { Expansion } from '../wikilinks';
 import { FileDiff, diffLines } from './diff';
+
+/**
+ * A vault path as an Obsidian internal link.
+ *
+ * The panel already delegates clicks and hover previews for `a.internal-link`
+ * inside the message list (see ChatView.onOpen) — that is how a [[link]] inside
+ * a rendered answer opens its note. Every other path the panel prints is the
+ * same thing, written by us instead of by MarkdownRenderer, so it gets the same
+ * markup instead of being dead text to retype into the quick switcher.
+ *
+ * A path with no note behind it stays plain text: clicking an internal link to
+ * a file that does not exist offers to create it, which is not what a record of
+ * what just happened should do.
+ */
+export function createPathLink(
+	app: App,
+	parent: HTMLElement,
+	path: string,
+	label = path,
+): HTMLElement {
+	const file = path.split('#')[0] ?? path;
+	if (!(app.vault.getAbstractFileByPath(file) instanceof TFile)) {
+		return parent.createSpan({ cls: 'va-path', text: label });
+	}
+	return parent.createEl('a', {
+		cls: 'internal-link va-path',
+		text: label,
+		attr: { href: path, 'data-href': path },
+	});
+}
 
 /**
  * What the endpoint reported about one turn, as the line under an answer.
@@ -86,12 +117,52 @@ export function addUserBubble(parent: HTMLElement, text: string): HTMLElement {
 /**
  * What the [[link]] expander attached to a message, under the bubble that sent
  * it. Pulling a note into a message without showing it would be the plugin
- * quietly sending vault contents the user did not watch it send.
+ * quietly sending vault contents the user did not watch it send — so every
+ * note named here is a link to the note itself, and checking what was sent is
+ * a click rather than a search.
  */
-export function addInlinedNote(bubble: HTMLElement, lines: string[]): void {
-	if (!lines.length) return;
+export function addExpansionNote(app: App, bubble: HTMLElement, e: Expansion): void {
+	if (!e.inlined.length && !e.missed.length && !e.blocked.length && !e.deferred.length) return;
 	const note = bubble.createDiv({ cls: 'va-inlined' });
-	for (const line of lines) note.createDiv({ text: `↘ ${line}` });
+	const row = (): HTMLElement => {
+		const line = note.createDiv();
+		line.appendText('↘ ');
+		return line;
+	};
+
+	if (e.inlined.length) {
+		const chars = e.inlined.reduce((n, i) => n + i.chars, 0);
+		const line = row();
+		line.appendText('inlined ');
+		e.inlined.forEach((i, n) => {
+			if (n) line.appendText(' · ');
+			const hash = i.link.indexOf('#');
+			createPathLink(app, line, hash === -1 ? i.path : `${i.path}${i.link.slice(hash)}`);
+		});
+		line.appendText(` (${(chars / 1000).toFixed(1)}k)`);
+	}
+
+	for (const m of e.missed) {
+		const line = row();
+		line.appendText(`[[${m.link}]] matched no note`);
+		if (m.near) {
+			line.appendText(' — did you mean ');
+			createPathLink(app, line, m.near);
+			line.appendText('?');
+		}
+	}
+
+	if (e.blocked.length) {
+		row().appendText(
+			e.blocked.length === 1
+				? '1 link is in a blocked folder — not attached'
+				: `${e.blocked.length} links are in blocked folders — not attached`,
+		);
+	}
+
+	if (e.deferred.length) {
+		row().appendText(`${e.deferred.length} more linked, not attached (message budget)`);
+	}
 }
 
 /** A finished assistant message, rendered as markdown (saved transcripts, non-streamed turns). */
@@ -113,6 +184,13 @@ export function addToolCall(parent: HTMLElement, call: ToolCall): HTMLElement {
 	summary.createSpan({ text: ` ${call.name}` });
 	details.createEl('pre', { cls: 'va-tool-args', text: prettyJson(call.arguments) });
 	return details;
+}
+
+/** "Updated <path>", with the path as a link to the note it names. */
+function setChangeLabel(app: App, label: HTMLElement, change: FileChange): void {
+	label.empty();
+	label.appendText(`${change.kind === 'create' ? 'Created' : 'Updated'} `);
+	createPathLink(app, label, change.path);
 }
 
 /** Changed lines beyond this are summarised rather than drawn. */
@@ -159,7 +237,7 @@ function renderDiffBody(parent: HTMLElement, diff: FileDiff): void {
  * A write, shown as a diff: green additions, red removals, a little context.
  * Small changes are expanded; larger ones collapse behind their line counts.
  */
-export function addFileChange(parent: HTMLElement, change: FileChange): HTMLElement {
+export function addFileChange(app: App, parent: HTMLElement, change: FileChange): HTMLElement {
 	const diff = diffLines(change.before, change.after);
 	const card = parent.createEl('details', { cls: 'va-change' });
 	card.open = !diff.truncated && diff.added + diff.removed <= OPEN_BELOW;
@@ -169,10 +247,7 @@ export function addFileChange(parent: HTMLElement, change: FileChange): HTMLElem
 		summary.createSpan({ cls: 'va-change-icon' }),
 		change.kind === 'create' ? 'file-plus' : 'file-pen',
 	);
-	summary.createSpan({
-		cls: 'va-change-path',
-		text: `${change.kind === 'create' ? 'Created' : 'Updated'} ${change.path}`,
-	});
+	setChangeLabel(app, summary.createSpan({ cls: 'va-change-path' }), change);
 	renderCounts(summary, diff);
 	renderDiffBody(card, diff);
 	return card;
@@ -203,11 +278,9 @@ export function addDiffPreview(parent: HTMLElement, before: string, after: strin
  * yes to becomes the record of what happened — rather than drawing the same
  * diff twice.
  */
-export function markPreviewApplied(card: HTMLElement, change: FileChange): void {
+export function markPreviewApplied(app: App, card: HTMLElement, change: FileChange): void {
 	const label = card.querySelector('.va-change-path');
-	if (label instanceof HTMLElement) {
-		label.setText(`${change.kind === 'create' ? 'Created' : 'Updated'} ${change.path}`);
-	}
+	if (label instanceof HTMLElement) setChangeLabel(app, label, change);
 	card.removeClass('va-change-preview');
 }
 

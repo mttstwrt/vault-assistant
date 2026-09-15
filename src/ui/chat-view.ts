@@ -28,7 +28,7 @@ import { ImportModal } from './import-modal';
 import { WorkflowModal, WorkflowStart } from './workflow-modal';
 import { WorkflowRun, createRunNote } from '../workflows/runner';
 import { prepareContext, stripPrePass } from '../prepass';
-import { Expansion, expandWikilinks } from '../wikilinks';
+import { expandWikilinks } from '../wikilinks';
 import { Filing, suggestFiling } from '../filing';
 import { buildOpenFilesBlock, stripOpenFiles } from '../tools/workspace';
 import { AssistantTurn } from './assistant-turn';
@@ -45,8 +45,9 @@ import {
 	addUserBubble,
 	markPreviewApplied,
 	prettyJson,
-	addInlinedNote,
+	addExpansionNote,
 	addStats,
+	createPathLink,
 } from './message-render';
 
 export const VIEW_TYPE_CHAT = 'vault-assistant-view';
@@ -55,32 +56,6 @@ const PLACEHOLDER = 'Ask about your vault…  (Enter to send, Shift+Enter for ne
 
 /** How close to the bottom still counts as "following the output", in pixels. */
 const FOLLOW_SLACK = 32;
-
-/** The `↘ …` lines under a user bubble: what was attached, and what was not. */
-function describeExpansion(e: Expansion): string[] {
-	const lines: string[] = [];
-	if (e.inlined.length) {
-		const chars = e.inlined.reduce((n, i) => n + i.chars, 0);
-		const names = e.inlined.map((i) => `${i.path}${i.link.includes('#') ? `#${i.link.split('#')[1] ?? ''}` : ''}`);
-		lines.push(`inlined ${names.join(' · ')} (${(chars / 1000).toFixed(1)}k)`);
-	}
-	for (const m of e.missed) {
-		lines.push(
-			m.near
-				? `[[${m.link}]] matched no note — did you mean ${m.near}?`
-				: `[[${m.link}]] matched no note`,
-		);
-	}
-	if (e.blocked.length) {
-		lines.push(
-			e.blocked.length === 1
-				? '1 link is in a blocked folder — not attached'
-				: `${e.blocked.length} links are in blocked folders — not attached`,
-		);
-	}
-	if (e.deferred.length) lines.push(`${e.deferred.length} more linked, not attached (message budget)`);
-	return lines;
-}
 
 export class ChatView extends ItemView {
 	private plugin: VaultAssistantPlugin;
@@ -163,7 +138,7 @@ export class ChatView extends ItemView {
 
 		const header = root.createDiv({ cls: 'va-header' });
 		header.createEl('span', { text: 'Vault assistant', cls: 'va-title' });
-		const newBtn = header.createEl('button', { cls: 'va-new', attr: { 'aria-label': 'New chat' } });
+		const newBtn = header.createEl('button', { cls: 'va-header-btn', attr: { 'aria-label': 'New chat' } });
 		setIcon(newBtn, 'plus');
 		newBtn.onclick = () => void this.resetConversation();
 
@@ -171,14 +146,14 @@ export class ChatView extends ItemView {
 		// button that comes and goes with a setting is harder to find than a
 		// redundant one.
 		const saveBtn = header.createEl('button', {
-			cls: 'va-new',
+			cls: 'va-header-btn',
 			attr: { 'aria-label': 'Save conversation' },
 		});
 		setIcon(saveBtn, 'save');
 		saveBtn.onclick = () => void this.saveNow();
 
 		const openBtn = header.createEl('button', {
-			cls: 'va-new',
+			cls: 'va-header-btn',
 			attr: { 'aria-label': 'Open previous conversation' },
 		});
 		setIcon(openBtn, 'history');
@@ -188,7 +163,7 @@ export class ChatView extends ItemView {
 			).open();
 
 		const importBtn = header.createEl('button', {
-			cls: 'va-new',
+			cls: 'va-header-btn',
 			attr: { 'aria-label': 'Import conversations' },
 		});
 		setIcon(importBtn, 'import');
@@ -198,7 +173,7 @@ export class ChatView extends ItemView {
 		// of once the panel is already in its own window.
 		if (Platform.isDesktopApp && !this.inPopoutWindow()) {
 			const popBtn = header.createEl('button', {
-				cls: 'va-new',
+				cls: 'va-header-btn',
 				attr: { 'aria-label': 'Move chat to a new window' },
 			});
 			setIcon(popBtn, 'picture-in-picture-2');
@@ -206,7 +181,7 @@ export class ChatView extends ItemView {
 		}
 
 		const workflowBtn = header.createEl('button', {
-			cls: 'va-new',
+			cls: 'va-header-btn',
 			attr: { 'aria-label': 'Run workflow' },
 		});
 		setIcon(workflowBtn, 'telescope');
@@ -544,7 +519,8 @@ export class ChatView extends ItemView {
 		this.messagesEl.empty();
 		this.followOutput = true;
 		this.ring.reset();
-		addInfo(this.messagesEl, `Continuing "${file.basename}".`);
+		const resumed = addInfo(this.messagesEl, 'Continuing ');
+		createPathLink(this.app, resumed, file.path, file.basename);
 		for (const m of messages) {
 			if (m.role === 'user') addUserBubble(this.messagesEl, m.content);
 			else if (m.role === 'assistant') await this.addAssistantBubble(m.content);
@@ -579,7 +555,11 @@ export class ChatView extends ItemView {
 							: `The agent wants to create a folder outside your allowed folders (via ${req.tool}):`,
 				});
 				const line = card.createEl('code', { cls: 'va-approval-path' });
-				line.setText(req.kind === 'move' ? `${req.path ?? ''}  →  ${req.toPath ?? ''}` : (req.path ?? ''));
+				createPathLink(this.app, line, req.path ?? '');
+				if (req.kind === 'move') {
+					line.appendText('  →  ');
+					createPathLink(this.app, line, req.toPath ?? '');
+				}
 			} else if (req.kind === 'mcp') {
 				card.createDiv({
 					cls: 'va-approval-body',
@@ -594,7 +574,7 @@ export class ChatView extends ItemView {
 					cls: 'va-approval-body',
 					text: `The agent wants to write outside your allowed folders (via ${req.tool}):`,
 				});
-				card.createEl('code', { cls: 'va-approval-path', text: req.path ?? '' });
+				createPathLink(this.app, card.createEl('code', { cls: 'va-approval-path' }), req.path ?? '');
 				// Decide on the actual change, not just the path.
 				if (req.preview) preview = addDiffPreview(card, req.preview.before, req.preview.after);
 			}
@@ -680,11 +660,11 @@ export class ChatView extends ItemView {
 		const approved = this.approvedWrite;
 		if (approved && approved.path === change.path && approved.after === change.after) {
 			// This is the write the approval card already previewed.
-			markPreviewApplied(approved.card, change);
+			markPreviewApplied(this.app, approved.card, change);
 			this.approvedWrite = null;
 			return;
 		}
-		addFileChange(this.messagesEl, change);
+		addFileChange(this.app, this.messagesEl, change);
 		this.scrollToBottom();
 	}
 
@@ -777,7 +757,7 @@ export class ChatView extends ItemView {
 			? await expandWikilinks(this.app, this.plugin.settings, text, this.linkSourcePath())
 			: null;
 		if (expansion) {
-			addInlinedNote(bubble, describeExpansion(expansion));
+			addExpansionNote(this.app, bubble, expansion);
 			this.scrollToBottom();
 		}
 		this.history.push({ role: 'user', content: text + (expansion?.block ?? '') });
@@ -975,7 +955,8 @@ export class ChatView extends ItemView {
 				? `Resuming "${start.file.basename}" with ${start.workflow.name} (${budget}).`
 				: `${start.workflow.name} (${budget}): ${start.goal}`,
 		);
-		addInfo(this.messagesEl, `Progress is saved to "${path}".`);
+		const saved = addInfo(this.messagesEl, 'Progress is saved to ');
+		createPathLink(this.app, saved, path);
 
 		this.setBusy(true, 'run');
 		this.setStatus('Workflow run in progress…');
