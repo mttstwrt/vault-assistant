@@ -10,6 +10,7 @@ import {
 	setIcon,
 } from 'obsidian';
 import type VaultAssistantPlugin from '../main';
+import { CallStats } from '../api/client';
 import { serverContextSize } from '../api/props';
 import { ModelEntry, filterModels, listModels, modelOptionLabel } from '../api/models';
 import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
@@ -45,6 +46,7 @@ import {
 	markPreviewApplied,
 	prettyJson,
 	addInlinedNote,
+	addStats,
 } from './message-render';
 
 export const VIEW_TYPE_CHAT = 'vault-assistant-view';
@@ -94,6 +96,12 @@ export class ChatView extends ItemView {
 	private sendBtn!: HTMLButtonElement;
 	private modelEl!: HTMLSelectElement;
 	private ring!: ContextRing;
+	/** The newest turn's numbers, for the footer under a non-streamed answer. */
+	private lastStats: CallStats | null = null;
+	/** The context window the endpoint reported, or null while it is unknown. */
+	private contextTotal: number | null = null;
+	/** "baseUrl|model" pairs already re-asked for a window (see retryContextTotal). */
+	private contextRetried = new Set<string>();
 	private toolEls = new Map<string, HTMLElement>();
 	/** Write paths the user approved for the rest of this conversation. */
 	private sessionWrites = new Set<string>();
@@ -362,11 +370,29 @@ export class ChatView extends ItemView {
 	 * Ask the endpoint how big this model's context window is. llama.cpp
 	 * answers; most don't, and the ring says so rather than guessing.
 	 */
-	private refreshContextTotal(): void {
+	private refreshContextTotal(refresh = false): void {
 		const { baseUrl, apiKey, model } = this.plugin.settings;
-		void serverContextSize(baseUrl, apiKey, model).then((total) => {
+		void serverContextSize(baseUrl, apiKey, model, refresh).then((total) => {
+			this.contextTotal = total;
 			if (this.mounted) this.ring.setTotal(total);
 		});
+	}
+
+	/**
+	 * Ask again for a context window that came back unknown, now that a turn
+	 * has landed. On a llama.cpp router the first lookup asks with
+	 * `autoload=false`, so a model that was not resident reported nothing — and
+	 * an answer is proof that it is resident now. Once per endpoint and model,
+	 * because an endpoint that simply has no /props would otherwise be re-asked
+	 * after every turn forever.
+	 */
+	private retryContextTotal(): void {
+		if (this.contextTotal !== null) return;
+		const { baseUrl, model } = this.plugin.settings;
+		const key = `${baseUrl}|${model}`;
+		if (this.contextRetried.has(key)) return;
+		this.contextRetried.add(key);
+		this.refreshContextTotal(true);
 	}
 
 	/** Whether this panel is already living in its own window. */
@@ -469,22 +495,31 @@ export class ChatView extends ItemView {
 		);
 	}
 
-	private async resetConversation(): Promise<void> {
-		if (this.busy || this.saving) {
-			this.busyNotice();
-			return;
-		}
+	/**
+	 * Drop everything conversation-scoped and start a fresh system prompt.
+	 * Says nothing on screen: a chat announces itself, a workflow run announces
+	 * the run instead, so the banner belongs to the caller.
+	 */
+	private async clearConversation(): Promise<void> {
 		this.cancelPendingApprovals();
-		const systemPrompt = await buildSystemPrompt(this.app, this.plugin.settings);
-		this.history = [{ role: 'system', content: systemPrompt }];
+		this.history = [{ role: 'system', content: await buildSystemPrompt(this.app, this.plugin.settings) }];
 		this.conversationPath = null;
 		this.persistedCount = 0;
+		this.lastStats = null;
 		this.toolEls.clear();
 		this.sessionWrites.clear();
 		this.sessionMcp.clear();
 		this.messagesEl.empty();
 		this.followOutput = true;
 		this.ring.reset();
+	}
+
+	private async resetConversation(): Promise<void> {
+		if (this.busy || this.saving) {
+			this.busyNotice();
+			return;
+		}
+		await this.clearConversation();
 		addInfo(
 			this.messagesEl,
 			'New conversation. The agent can read and (within allowed folders) write your vault.',
@@ -614,8 +649,15 @@ export class ChatView extends ItemView {
 		this.statusEl.toggleClass('va-hidden', !text);
 	}
 
-	private async addAssistantBubble(markdown: string): Promise<void> {
-		await addAssistantBubble(this.app, this, this.messagesEl, markdown);
+	/**
+	 * A finished answer that was not streamed — a buffered turn, or a saved
+	 * transcript being reopened. `live` turns mean "this just came off the
+	 * endpoint", which is what earns the stats line a streamed turn gets from
+	 * AssistantTurn; a replayed transcript carries no timings to report.
+	 */
+	private async addAssistantBubble(markdown: string, live = false): Promise<void> {
+		const bubble = await addAssistantBubble(this.app, this, this.messagesEl, markdown);
+		if (live && this.lastStats) addStats(bubble, { stats: this.lastStats, aborted: false });
 		this.scrollToBottom();
 	}
 
@@ -651,12 +693,21 @@ export class ChatView extends ItemView {
 		this.scrollToBottom();
 	}
 
-	/** Toggle the chat UI: Send becomes Stop while an answer is in flight. */
-	private setBusy(busy: boolean): void {
+	/**
+	 * Toggle the panel for work in flight: Send becomes Stop, and the model
+	 * selector locks — swapping models between the tool rounds of one message,
+	 * or between the steps of one run, would split that work across two of them.
+	 *
+	 * A run additionally locks the composer, because there is no turn for a
+	 * typed message to join; during a chat answer the composer stays live so the
+	 * next message can be written while this one finishes.
+	 */
+	private setBusy(busy: boolean, mode: 'chat' | 'run' = 'chat'): void {
 		this.busy = busy;
-		// Swapping models between the tool rounds of one message would split
-		// that answer across two of them.
 		this.modelEl.disabled = busy;
+		const locked = busy && mode === 'run';
+		this.inputEl.disabled = locked;
+		this.inputEl.placeholder = locked ? 'Workflow run in progress…' : PLACEHOLDER;
 		this.sendBtn.disabled = false;
 		this.sendBtn.setText(busy ? 'Stop' : 'Send');
 		this.sendBtn.toggleClass('va-stop', busy);
@@ -761,12 +812,16 @@ export class ChatView extends ItemView {
 				this.sessionMcp,
 				this.history,
 				{
-					onAssistant: (c) => void this.addAssistantBubble(c),
+					onAssistant: (c) => void this.addAssistantBubble(c, true),
 					onToolCall: (call) => this.addToolCall(call),
 					onToolResult: (call, res) => this.addToolResult(call, res),
 					onError: (msg) => this.addError(msg),
 					onFileChange: (change) => this.addFileChange(change),
-					onStats: (stats) => this.ring.report(stats),
+					onStats: (stats) => {
+						this.lastStats = stats;
+						this.ring.report(stats);
+						this.retryContextTotal();
+					},
 					requestApproval: (req) => this.requestApproval(req),
 					stream: {
 						onStart: () => {
@@ -884,17 +939,12 @@ export class ChatView extends ItemView {
 	}
 
 	/** Open the workflow modal (also reachable via the "Run workflow" command). */
-	openWorkflowModal(preselectId?: string): void {
+	openWorkflowModal(): void {
 		if (this.busy) {
 			this.busyNotice();
 			return;
 		}
-		new WorkflowModal(
-			this.app,
-			this.plugin,
-			(start) => void this.startWorkflow(start),
-			preselectId,
-		).open();
+		new WorkflowModal(this.app, this.plugin, (start) => void this.startWorkflow(start)).open();
 	}
 
 	/** Host an autonomous workflow run in this panel until it pauses or finishes. */
@@ -903,11 +953,10 @@ export class ChatView extends ItemView {
 			this.busyNotice();
 			return;
 		}
-		// The run builds its own per-round context; reset the panel so any chat
+		// The run builds its own per-round context; clear the panel so any chat
 		// afterwards starts from a clean conversation. The run's transcript is
 		// not saved as a conversation — the run note is the artifact.
-		await this.resetConversation();
-		this.messagesEl.empty();
+		await this.clearConversation();
 
 		let path: string;
 		try {
@@ -928,7 +977,8 @@ export class ChatView extends ItemView {
 		);
 		addInfo(this.messagesEl, `Progress is saved to "${path}".`);
 
-		this.setRunBusy(true);
+		this.setBusy(true, 'run');
+		this.setStatus('Workflow run in progress…');
 		this.workflowRun = new WorkflowRun(
 			this.app,
 			this.plugin.settings,
@@ -938,7 +988,7 @@ export class ChatView extends ItemView {
 			start.workflow,
 			{ path, maxRounds: start.maxRounds, delaySeconds: start.delaySeconds },
 			{
-				onAssistant: (c) => void this.addAssistantBubble(c),
+				onAssistant: (c) => void this.addAssistantBubble(c, true),
 				onToolCall: (call) => this.addToolCall(call),
 				onToolResult: (call, res) => this.addToolResult(call, res),
 				onError: (msg) => this.addError(msg),
@@ -956,19 +1006,9 @@ export class ChatView extends ItemView {
 			this.addError(`Run failed: ${e instanceof Error ? e.message : String(e)}`);
 		} finally {
 			this.workflowRun = null;
-			this.setRunBusy(false);
+			this.setBusy(false, 'run');
+			this.setStatus(null);
 		}
 	}
 
-	/** Toggle the run UI: input locked, Send becomes Stop. */
-	private setRunBusy(busy: boolean): void {
-		this.busy = busy;
-		this.inputEl.disabled = busy;
-		this.inputEl.placeholder = busy ? 'Workflow run in progress…' : PLACEHOLDER;
-		this.setStatus(busy ? 'Workflow run in progress…' : null);
-		this.sendBtn.disabled = false;
-		this.sendBtn.setText(busy ? 'Stop' : 'Send');
-		this.sendBtn.toggleClass('va-stop', busy);
-		this.sendBtn.onclick = busy ? () => this.interrupt() : () => void this.send();
-	}
 }

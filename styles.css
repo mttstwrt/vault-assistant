@@ -216,10 +216,6 @@
 	padding: 2px 0;
 }
 
-.va-thinking {
-	font-style: italic;
-}
-
 .va-error {
 	font-size: var(--font-ui-small);
 	color: var(--text-error);

@@ -34,7 +34,6 @@ export class WorkflowModal extends Modal {
 		app: App,
 		plugin: VaultAssistantPlugin,
 		onStart: (start: WorkflowStart) => void,
-		private preselectId?: string,
 	) {
 		super(app);
 		this.plugin = plugin;
@@ -50,8 +49,7 @@ export class WorkflowModal extends Modal {
 		const { workflows, warnings } = loadWorkflows(this.app, this.plugin.settings, WORKFLOW_PRESETS);
 		this.workflows = workflows;
 		for (const w of warnings) new Notice(`Workflow skipped: ${w}`);
-		const initial =
-			workflows.find((w) => w.id === (this.preselectId ?? 'deep-research')) ?? workflows[0];
+		const initial = workflows.find((w) => w.id === 'deep-research') ?? workflows[0];
 		if (!initial) {
 			contentEl.createEl('p', { text: 'No workflows available.' });
 			return;

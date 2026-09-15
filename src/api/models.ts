@@ -141,7 +141,7 @@ export function filterModels(models: ModelEntry[], kind: 'chat' | 'embed'): Mode
  * A readable label for a model id. llama.cpp reports the path of the file it
  * loaded, which is unreadable in a dropdown; the id itself is what gets sent.
  */
-export function modelLabel(id: string): string {
+function modelLabel(id: string): string {
 	const name = id.split(/[\\/]/).pop() ?? id;
 	return name.replace(/\.gguf$/i, '') || id;
 }

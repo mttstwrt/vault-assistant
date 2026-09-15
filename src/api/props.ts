@@ -42,13 +42,22 @@ function propsUrl(baseUrl: string, model: string): string {
  * The context window `model` is served with, or null whenever that can't be
  * established — an endpoint without /props, a router speaking for itself
  * (`n_ctx: 0`), or any failure at all.
+ *
+ * A null is cached like any other answer, because this is asked again on every
+ * settings change and an endpoint without /props would otherwise be re-asked
+ * per keystroke. `refresh` is how a caller says the precondition has changed:
+ * on a router, a model that was not resident when first asked (the lookup
+ * carries `autoload=false`) reports nothing until something loads it, and the
+ * fact that it has just answered is the proof that something did.
  */
 export function serverContextSize(
 	baseUrl: string,
 	apiKey: string,
 	model: string,
+	refresh = false,
 ): Promise<number | null> {
 	const url = propsUrl(baseUrl, model);
+	if (refresh) cache.delete(url);
 	const hit = cache.get(url);
 	if (hit) return hit;
 

@@ -5,7 +5,7 @@
  */
 import { App, Component, MarkdownRenderer, setIcon } from 'obsidian';
 import { CallStats } from '../api/client';
-import { addCopyButton } from './message-render';
+import { addCopyButton, addStats } from './message-render';
 
 export interface TurnOptions {
 	/** Keep the thinking section open while the model reasons. */
@@ -106,8 +106,7 @@ export class AssistantTurn {
 			}
 		}
 
-		const footer = this.statusLine(info);
-		if (footer && this.bubble) this.bubble.createDiv({ cls: 'va-stats', text: footer });
+		if (this.bubble) addStats(this.bubble, info);
 		this.opts.onGrow();
 	}
 
@@ -119,18 +118,6 @@ export class AssistantTurn {
 	/** Stop the elapsed-time ticker (the view is closing mid-stream). */
 	dispose(): void {
 		this.stopTicker();
-	}
-
-	private statusLine(info: { stats?: CallStats; aborted: boolean }): string {
-		const parts: string[] = [];
-		if (info.aborted) parts.push('Stopped');
-		const s = info.stats;
-		if (s) {
-			parts.push(`${(s.elapsedMs / 1000).toFixed(1)}s`);
-			if (s.completionTokens) parts.push(`${s.completionTokens} tokens`);
-			if (s.tokensPerSecond) parts.push(`${s.tokensPerSecond.toFixed(1)} tok/s`);
-		}
-		return parts.join(' · ');
 	}
 
 	private ensureBubble(): HTMLElement {

@@ -39,11 +39,6 @@ export function writeScopes(s: VaultAssistantSettings): string[] {
 	return [...s.writePaths, ...specialFolders(s)];
 }
 
-/** Folders/files the agent must never see (read blocklist). */
-export function blockedReadPaths(s: VaultAssistantSettings): string[] {
-	return s.readBlockPaths;
-}
-
 export function isWritable(path: string, s: VaultAssistantSettings): boolean {
 	return underAny(path, writeScopes(s));
 }

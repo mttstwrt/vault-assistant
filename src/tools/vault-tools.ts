@@ -408,17 +408,30 @@ async function ensureWritable(
 			ctx.sessionWrites.add(p);
 			return null;
 		case 'always-file':
-			ctx.settings.writePaths.push(p);
-			await ctx.saveSettings();
+			await grantWrite(ctx, p);
 			return null;
 		case 'always-folder':
-			ctx.settings.writePaths.push(folder || p);
-			await ctx.saveSettings();
+			await grantWrite(ctx, folder || p);
 			return null;
 		case 'deny':
 		default:
 			return `Error: writing to "${p}" is not permitted. Writable folders: ${displayScopes(writeScopes(ctx.settings))}.`;
 	}
+}
+
+/**
+ * Widen the persistent write allowlist and save.
+ *
+ * A path already covered by an existing entry is skipped: "always allow this
+ * folder" is granted per conversation, so without this the same folder piles up
+ * in the user's settings once per grant, and a subfolder gets its own line under
+ * a parent that already covers it.
+ */
+async function grantWrite(ctx: ToolContext, ...paths: string[]): Promise<void> {
+	for (const p of paths) {
+		if (p && !isWritable(p, ctx.settings)) ctx.settings.writePaths.push(p);
+	}
+	await ctx.saveSettings();
 }
 
 /** The "you may not" message, naming what the agent may in fact touch. */
@@ -451,12 +464,10 @@ async function ensureMovable(ctx: ToolContext, from: string, to: string): Promis
 			ctx.sessionWrites.add(to);
 			return null;
 		case 'always-file':
-			ctx.settings.writePaths.push(from, to);
-			await ctx.saveSettings();
+			await grantWrite(ctx, from, to);
 			return null;
 		case 'always-folder':
-			ctx.settings.writePaths.push(parentFolder(from) || from, parentFolder(to) || to);
-			await ctx.saveSettings();
+			await grantWrite(ctx, parentFolder(from) || from, parentFolder(to) || to);
 			return null;
 		default:
 			return outOfScope(ctx, `moving "${from}" to "${to}"`);
@@ -480,8 +491,7 @@ async function ensureFolderAllowed(ctx: ToolContext, path: string): Promise<stri
 			ctx.sessionWrites.add(path);
 			return null;
 		case 'always-folder':
-			ctx.settings.writePaths.push(parentFolder(path) || path);
-			await ctx.saveSettings();
+			await grantWrite(ctx, parentFolder(path) || path);
 			return null;
 		default:
 			return outOfScope(ctx, `creating the folder "${path}"`);

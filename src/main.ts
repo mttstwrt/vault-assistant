@@ -61,7 +61,7 @@ export default class VaultAssistantPlugin extends Plugin {
 
 		this.addCommand({
 			id: 'start-research',
-			name: 'Run workflow (research, presets…)',
+			name: 'Run workflow',
 			callback: () => void this.openWorkflow(),
 		});
 
@@ -104,7 +104,10 @@ export default class VaultAssistantPlugin extends Plugin {
 			void this.mcp.connectAll(this.app, this.settings);
 			// Catch-up pass shortly after startup, then a steady tick. The real
 			// cadence (every N hours) is enforced inside maybeRunScheduled.
-			window.setTimeout(() => void this.maybeRunScheduled(), 30_000);
+			// The catch-up is registered too: a plugin disabled inside its first
+			// half-minute would otherwise still fire a run at an unloaded one.
+			const catchUp = window.setTimeout(() => void this.maybeRunScheduled(), 30_000);
+			this.register(() => window.clearTimeout(catchUp));
 			this.registerInterval(
 				window.setInterval(() => void this.maybeRunScheduled(), SCHEDULE_TICK_MS),
 			);
@@ -229,10 +232,10 @@ export default class VaultAssistantPlugin extends Plugin {
 	}
 
 	/** Open the chat panel and the workflow modal. */
-	async openWorkflow(preselectId?: string): Promise<void> {
+	async openWorkflow(): Promise<void> {
 		await this.activateView();
 		const view = this.app.workspace.getLeavesOfType(VIEW_TYPE_CHAT)[0]?.view;
-		if (view instanceof ChatView) view.openWorkflowModal(preselectId);
+		if (view instanceof ChatView) view.openWorkflowModal();
 	}
 
 	/**

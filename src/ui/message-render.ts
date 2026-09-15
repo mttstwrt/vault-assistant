@@ -1,7 +1,32 @@
 /** Rendering helpers shared by the chat panel and its streaming turns. */
 import { App, Component, MarkdownRenderer, Notice, setIcon } from 'obsidian';
+import { CallStats } from '../api/client';
 import { FileChange, ToolCall } from '../types';
 import { FileDiff, diffLines } from './diff';
+
+/**
+ * What the endpoint reported about one turn, as the line under an answer.
+ * Shared by streamed and buffered turns so the two report alike — an endpoint
+ * that volunteers timings says the same thing whichever way it was called.
+ * Empty when there is nothing to report.
+ */
+export function statsFooter(info: { stats?: CallStats; aborted: boolean }): string {
+	const parts: string[] = [];
+	if (info.aborted) parts.push('Stopped');
+	const s = info.stats;
+	if (s) {
+		parts.push(`${(s.elapsedMs / 1000).toFixed(1)}s`);
+		if (s.completionTokens) parts.push(`${s.completionTokens} tokens`);
+		if (s.tokensPerSecond) parts.push(`${s.tokensPerSecond.toFixed(1)} tok/s`);
+	}
+	return parts.join(' · ');
+}
+
+/** Add the stats line to a finished bubble, when there is anything to say. */
+export function addStats(bubble: HTMLElement, info: { stats?: CallStats; aborted: boolean }): void {
+	const text = statsFooter(info);
+	if (text) bubble.createDiv({ cls: 'va-stats', text });
+}
 
 /** Pretty-print a JSON string for display, falling back to the raw text. */
 export function prettyJson(raw: string): string {
@@ -40,7 +65,7 @@ export function addCopyButton(parent: HTMLElement, getText: () => string): HTMLB
 }
 
 /** A message bubble with its role label and copy button. */
-export function createBubble(
+function createBubble(
 	parent: HTMLElement,
 	role: 'user' | 'assistant',
 	getText: () => string,

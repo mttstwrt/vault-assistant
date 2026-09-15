@@ -9,7 +9,7 @@ import { VaultAssistantSettings } from './settings';
  * prompt at the start of every conversation, so durable facts are recalled with
  * zero tool calls. Keep it short and high-signal.
  */
-export async function readMemory(app: App, settings: VaultAssistantSettings): Promise<string> {
+async function readMemory(app: App, settings: VaultAssistantSettings): Promise<string> {
 	if (!settings.useMemory || !settings.memoryFile.trim()) return '';
 	const p = normalizePath(settings.memoryFile);
 	const f = app.vault.getAbstractFileByPath(p);

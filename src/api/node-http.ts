@@ -38,7 +38,7 @@ const LOOPBACK = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]']);
 const OFFLINE = /ERR_INTERNET_DISCONNECTED|ERR_NETWORK_CHANGED|ERR_NAME_NOT_RESOLVED|ERR_ADDRESS_UNREACHABLE|Failed to fetch|NetworkError/i;
 
 /** Whether `url` points at a server on this machine. */
-export function isLocalEndpoint(url: string): boolean {
+function isLocalEndpoint(url: string): boolean {
 	try {
 		const host = new URL(url).hostname.toLowerCase();
 		return LOOPBACK.has(host) || host.endsWith('.localhost');
