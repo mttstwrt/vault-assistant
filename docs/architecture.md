@@ -9,8 +9,10 @@ through the filesystem, and why nothing here assumes a shell.
 
 **`main.ts`** owns the plugin lifecycle and nothing else: settings, commands,
 the chat view's registration, the vault listeners that keep the semantic index
-fresh, and the timer behind scheduled runs. It lends the rest of the plugin an
-[`AgentDeps`](agent/README.md#what-a-run-borrows) rather than being reached into.
+fresh, and the timer behind scheduled runs. Anything that runs the agent takes
+an [`AgentDeps`](agent/README.md#what-a-run-borrows) from it — one object rather
+than five arguments — though the views still read `plugin.settings` directly,
+since settings change under them and a snapshot would go stale.
 
 **[The agent](agent/README.md)** is the loop: call the model, run the tools it
 asks for, feed the results back, repeat until it answers. It owns the tool

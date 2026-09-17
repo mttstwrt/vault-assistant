@@ -18,8 +18,8 @@ chat turn, a workflow step and a headless scheduled run unchanged.
 - `executeTool(ctx, name, argsJson, offered)` — `tools/vault-tools.ts`.
 - `TOOL_SPECS` / `activeToolSpecs(settings)` — `tools/specs.ts`, the schemas the
   model is given. Separate from dispatch because asking *which tools exist*
-  should not drag in *what happens when one is called*; `prompts.ts` and
-  `capabilities.ts` want only the names.
+  should not drag in *what happens when one is called* — `prompts.ts` wants only
+  the names, and imports them from here for that reason.
 - `buildSystemPrompt(app, settings)` — `prompts.ts`.
 
 ### What a run borrows
