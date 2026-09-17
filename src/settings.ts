@@ -7,7 +7,7 @@ import {
 	listModels,
 	modelOptionLabel,
 } from './api/models';
-import { clearPropsCache } from './api/props';
+import { ServerDefaults, clearPropsCache, serverDefaults } from './api/props';
 import { loadWorkflows } from './workflows/schema';
 import { WORKFLOW_PRESETS } from './workflows/presets';
 
@@ -48,7 +48,14 @@ export interface VaultAssistantSettings {
 	baseUrl: string;
 	apiKey: string;
 	model: string;
-	temperature: number;
+	/**
+	 * Sampling temperature, or null to send none and let the endpoint apply its
+	 * own. Null rather than a number-that-means-unset, because a plugin default
+	 * is indistinguishable from a choice once it has been saved — and silently
+	 * overriding `llama-server --temp 0.4` with a value nobody picked is what
+	 * that ambiguity costs.
+	 */
+	temperature: number | null;
 	maxSteps: number;
 	/** Merge extraBodyParams into every chat request (llama.cpp dynatemp etc.). */
 	useExtraBodyParams: boolean;
@@ -58,10 +65,10 @@ export interface VaultAssistantSettings {
 	streamResponses: boolean;
 	/** Keep the thinking section expanded while the model reasons. */
 	expandThinking: boolean;
-	/** OpenAI-style presence_penalty (-2 to 2). 0 sends nothing. */
-	presencePenalty: number;
-	/** Repetition penalty (1 = off, higher discourages repeats). 1 sends nothing. */
-	repetitionPenalty: number;
+	/** OpenAI-style presence_penalty (-2 to 2), or null to send none. */
+	presencePenalty: number | null;
+	/** Repetition penalty (higher discourages repeats), or null to send none. */
+	repetitionPenalty: number | null;
 
 	// --- Agent behaviour ---
 	systemPrompt: string;
@@ -192,14 +199,15 @@ export const DEFAULT_SETTINGS: VaultAssistantSettings = {
 	baseUrl: 'http://localhost:11434/v1',
 	apiKey: '',
 	model: 'llama3.1',
-	temperature: 0.7,
+	// Unset: the endpoint's own sampling applies until you say otherwise.
+	temperature: null,
 	maxSteps: 12,
 	useExtraBodyParams: false,
 	extraBodyParams: '{\n  "dynatemp_range": 0.4,\n  "dynatemp_exponent": 1.0\n}',
 	streamResponses: true,
 	expandThinking: true,
-	presencePenalty: 0,
-	repetitionPenalty: 1,
+	presencePenalty: null,
+	repetitionPenalty: null,
 	systemPrompt: DEFAULT_SYSTEM_PROMPT,
 	usePrePass: false,
 	useOpenFiles: true,
@@ -370,6 +378,49 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 		this.redrawPickers();
 	}
 
+	/**
+	 * One sampler: a number, or blank for "send nothing and let the endpoint
+	 * decide". Blank is the default, so the placeholder has to say what blank
+	 * actually does — otherwise the honest setting is the opaque one. llama.cpp
+	 * reports its own defaults through /props, so there the placeholder names
+	 * the number in force; everywhere else it can only say whose choice it is.
+	 */
+	private renderSampler(
+		container: HTMLElement,
+		opts: {
+			name: string;
+			desc: string;
+			read: () => number | null;
+			write: (value: number | null) => void;
+			valid: (n: number) => boolean;
+			serverValue: (defaults: ServerDefaults) => number | undefined;
+		},
+	): void {
+		const s = this.plugin.settings;
+		const row = new Setting(container).setName(opts.name).setDesc(opts.desc);
+		row.addText((t) => {
+			t.setPlaceholder('endpoint default');
+			t.setValue(opts.read() === null ? '' : String(opts.read()));
+			t.onChange(async (v) => {
+				if (!v.trim()) {
+					opts.write(null);
+					await this.save();
+					return;
+				}
+				const n = Number(v);
+				if (!Number.isNaN(n) && opts.valid(n)) {
+					opts.write(n);
+					await this.save();
+				}
+			});
+
+			void serverDefaults(s.baseUrl, s.apiKey, s.model).then((defaults) => {
+				const value = defaults ? opts.serverValue(defaults) : undefined;
+				if (value !== undefined) t.setPlaceholder(`${value} (this endpoint's default)`);
+			});
+		});
+	}
+
 	private redrawPickers(): void {
 		for (const render of this.pickers.values()) render();
 	}
@@ -445,48 +496,38 @@ export class VaultAssistantSettingTab extends PluginSettingTab {
 			},
 		});
 
-		new Setting(containerEl)
-			.setName('Temperature')
-			.setDesc('Sampling temperature (0–2).')
-			.addText((t) =>
-				t.setValue(String(s.temperature)).onChange(async (v) => {
-					const n = Number(v);
-					if (!Number.isNaN(n)) {
-						s.temperature = n;
-						await this.save();
-					}
-				}),
-			);
+		this.renderSampler(containerEl, {
+			name: 'Temperature',
+			desc: 'How much the model wanders. Leave blank to send nothing, so the endpoint applies whatever it was started with.',
+			read: () => s.temperature,
+			write: (v) => {
+				s.temperature = v;
+			},
+			valid: (n) => n >= 0 && n <= 2,
+			serverValue: (d) => d.temperature,
+		});
 
-		new Setting(containerEl)
-			.setName('Presence penalty')
-			.setDesc(
-				'Discourages the model from reusing anything it has already said (-2 to 2, 0 = off). Sent as presence_penalty. A small positive value helps a model that keeps circling the same phrasing.',
-			)
-			.addText((t) =>
-				t.setValue(String(s.presencePenalty)).onChange(async (v) => {
-					const n = Number(v);
-					if (!Number.isNaN(n) && n >= -2 && n <= 2) {
-						s.presencePenalty = n;
-						await this.save();
-					}
-				}),
-			);
+		this.renderSampler(containerEl, {
+			name: 'Presence penalty',
+			desc: 'Discourages the model from reusing anything it has already said (-2 to 2). Sent as presence_penalty; a small positive value helps a model that keeps circling the same phrasing. Blank sends nothing.',
+			read: () => s.presencePenalty,
+			write: (v) => {
+				s.presencePenalty = v;
+			},
+			valid: (n) => n >= -2 && n <= 2,
+			serverValue: (d) => d.presencePenalty,
+		});
 
-		new Setting(containerEl)
-			.setName('Repetition penalty')
-			.setDesc(
-				'Scales down tokens the model has already produced (1 = off; 1.05–1.2 is the useful range). Sent as both repeat_penalty (llama.cpp) and repetition_penalty (vLLM, TGI) — an endpoint ignores the name it does not use. This is the usual fix for a model that gets stuck repeating itself or thinking in circles.',
-			)
-			.addText((t) =>
-				t.setValue(String(s.repetitionPenalty)).onChange(async (v) => {
-					const n = Number(v);
-					if (!Number.isNaN(n) && n >= 0.5 && n <= 2) {
-						s.repetitionPenalty = n;
-						await this.save();
-					}
-				}),
-			);
+		this.renderSampler(containerEl, {
+			name: 'Repetition penalty',
+			desc: 'Scales down tokens the model has already produced (1 = no effect; 1.05–1.2 is the useful range). Sent as both repeat_penalty (llama.cpp) and repetition_penalty (vLLM, TGI) — an endpoint ignores the name it does not use. This is the usual fix for a model stuck repeating itself or thinking in circles. Blank sends nothing.',
+			read: () => s.repetitionPenalty,
+			write: (v) => {
+				s.repetitionPenalty = v;
+			},
+			valid: (n) => n >= 0.5 && n <= 2,
+			serverValue: (d) => d.repeatPenalty,
+		});
 
 		new Setting(containerEl)
 			.setName('Max tool steps')

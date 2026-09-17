@@ -123,23 +123,28 @@ export function chatRequestBody(
 	liveTimings = false,
 ): Record<string, unknown> {
 	const body: Record<string, unknown> = {
-		temperature: settings.temperature,
-		...extraBodyParams(settings),
 		model: overrides.model ?? settings.model,
 		messages: messages.map(toApiMessage),
 	};
-	if (overrides.temperature !== undefined) body.temperature = overrides.temperature;
 
-	// Sampler controls are only sent when set away from their defaults: an
-	// endpoint that rejects a parameter it doesn't know should never see one
-	// the user didn't ask for.
-	if (settings.presencePenalty !== 0) body.presence_penalty = settings.presencePenalty;
-	if (settings.repetitionPenalty !== 1) {
+	// A sampler left unset is not sent at all, so the endpoint applies its own —
+	// what `llama-server --temp 0.4` was launched with, or a model's Modelfile
+	// on Ollama. Sending a value nobody chose would silently overrule both, and
+	// an endpoint that rejects a parameter it does not know should never see one
+	// the user did not ask for.
+	if (settings.temperature !== null) body.temperature = settings.temperature;
+	if (settings.presencePenalty !== null) body.presence_penalty = settings.presencePenalty;
+	if (settings.repetitionPenalty !== null) {
 		// The same sampler under two names: llama.cpp calls it repeat_penalty,
 		// vLLM and TGI call it repetition_penalty. Servers ignore the other one.
 		body.repeat_penalty = settings.repetitionPenalty;
 		body.repetition_penalty = settings.repetitionPenalty;
 	}
+
+	// Extra params override the settings above, and a workflow step overrides
+	// both: the more specific the source, the later it is applied.
+	Object.assign(body, extraBodyParams(settings));
+	if (overrides.temperature !== undefined) body.temperature = overrides.temperature;
 
 	if (tools.length > 0) {
 		body.tools = tools.map((t) => ({ type: 'function', function: t }));

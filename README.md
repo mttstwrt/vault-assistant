@@ -61,13 +61,23 @@ The optional **conversation import** processes everything locally and only when 
 | Base URL | OpenAI-compatible base, e.g. `http://localhost:11434/v1` (Ollama), `http://localhost:1234/v1` (LM Studio), `https://api.openai.com/v1`. |
 | API key | Optional. Leave empty for local models. |
 | Model | Model name your endpoint expects, e.g. `llama3.1`, `gpt-4o-mini`. Models your endpoint advertises are detected when you open these settings and offered as a dropdown when there is more than one; the refresh button next to the field looks again after you change the URL. Typing a name always works, whatever was detected. The chat panel's header offers the same list, and picking there sets this. |
-| Temperature | Sampling temperature. |
-| Presence penalty | −2 to 2, 0 = off. Sent as `presence_penalty`. Discourages reusing anything already said; a small positive value helps a model that keeps circling the same phrasing. |
-| Repetition penalty | 1 = off; 1.05–1.2 is the useful range. Sent as **both** `repeat_penalty` (llama.cpp) and `repetition_penalty` (vLLM, TGI) — an endpoint ignores the name it doesn't use. The usual fix for a model that gets stuck repeating itself or thinking in circles. |
+| Temperature | How much the model wanders. **Blank by default**, which sends nothing, so your endpoint applies whatever it was started with — `llama-server --temp 0.4`, or a model's own Modelfile on Ollama. Type a number to override that. `0` is a value, not blank: it means greedy decoding and is sent. |
+| Presence penalty | −2 to 2. Sent as `presence_penalty`. Discourages reusing anything already said; a small positive value helps a model that keeps circling the same phrasing. Blank sends nothing. |
+| Repetition penalty | 1 = no effect; 1.05–1.2 is the useful range. Sent as **both** `repeat_penalty` (llama.cpp) and `repetition_penalty` (vLLM, TGI) — an endpoint ignores the name it doesn't use. The usual fix for a model that gets stuck repeating itself or thinking in circles. Blank sends nothing. |
 | Max tool steps | How many tool-call rounds the agent may take per message. |
 | Send extra request parameters | Optional. Merge a JSON object into every chat request to enable server-side samplers your endpoint supports — e.g. llama.cpp's dynamic temperature (`dynatemp_range`, `dynatemp_exponent`) or mirostat. llama.cpp's OpenAI-compatible server accepts these; Ollama's OpenAI route ignores them (use a Modelfile there instead). |
 | Stream responses | On by default. Shows the answer as it is written and lets you stop it mid-answer. Falls back to a single buffered request automatically if a stream can't be opened (some hosted APIs refuse in-app requests), so you can leave it on. |
 | Show thinking as it happens | On by default. Keeps the thinking section expanded while a reasoning model works. Turn it off to keep reasoning collapsed until you open it. |
+
+Sampler fields are **blank by default, and blank means "don't send it"** — the
+endpoint's own setting stands. That is what makes `llama-server --temp 0.4` do
+what it says instead of being quietly overruled by a number the plugin picked.
+On llama.cpp the placeholder in each blank field shows the value actually in
+force, read from `GET /props`; other endpoints don't report theirs, so there it
+says only whose choice it is. Upgrading from a version before this clears any
+sampler still sitting at its old shipped default, on the same reasoning the
+system prompt uses — a value identical to the default was never chosen. If you
+did deliberately want 0.7, type it back and it stays.
 
 **Folder permissions**
 
@@ -141,7 +151,9 @@ The conversations, wiki, and research folders and the memory file are always wri
 
 To hard-cap a runaway response, add `{"max_tokens": 2048}` under **Send extra request parameters**.
 
-**The context ring says the size is unknown.** Nothing in the OpenAI schema reports a model's context window, so the ring needs an endpoint willing to volunteer it. llama.cpp does, at `GET /props` (`default_generation_settings.n_ctx`, the per-slot budget); Ollama, LM Studio and OpenAI do not, and the ring stays empty and counts tokens without a total rather than inventing one. On a llama.cpp router the question is asked per model and never loads one to answer it, so a model you have not used yet reports its window only once it is loaded.
+**The context ring says the size is unknown.** Nothing in the OpenAI schema reports a model's context window, so the ring needs an endpoint willing to volunteer it. llama.cpp does, at `GET /props` (`default_generation_settings.n_ctx`, the per-slot budget); Ollama, LM Studio and OpenAI do not, and the ring stays empty and counts tokens without a total rather than inventing one. On a llama.cpp router the question is asked per model and never loads one to answer it, so a model you have not used yet reports its window only once it is loaded — and once it answers a message, the ring asks again, because answering proves it is loaded now.
+
+The same `/props` reply carries the sampler settings the server was started with, which is where the blank sampler fields get their placeholders. On llama.cpp the ring also moves *while* an answer is written rather than once per turn: the request asks for `timings_per_token`, which only llama.cpp understands, so it is sent only to an endpoint that has identified itself by answering `/props`.
 
 The count itself is the newest answer's prompt plus its output, which is what the whole conversation costs to send — llama.cpp gives it as `prompt_n + cache_n + predicted_n`, and the reused-from-cache part is most of it after the first turn. It moves a turn at a time, so a long prompt shows the previous figure until its answer lands, and it includes the tool results the agent pulled in while answering.
 

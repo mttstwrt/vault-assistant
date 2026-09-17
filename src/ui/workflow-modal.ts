@@ -196,9 +196,12 @@ export class WorkflowModal extends Modal {
 				text: w.steps.length > 1 ? `${i + 1} · ${step.id}` : step.id,
 			});
 			const badges = head.createDiv({ cls: 'va-wf-badges' });
+			// A step without its own temperature inherits the global setting, which
+			// is itself allowed to be unset — then the endpoint decides.
+			const temp = step.temperature ?? this.plugin.settings.temperature;
 			badges.createSpan({
 				cls: 'va-wf-badge',
-				text: `temp ${step.temperature ?? this.plugin.settings.temperature}`,
+				text: temp === null ? 'temp: endpoint default' : `temp ${temp}`,
 			});
 			if (step.model) badges.createSpan({ cls: 'va-wf-badge', text: step.model });
 			badges.createSpan({

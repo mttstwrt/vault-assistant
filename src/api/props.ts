@@ -1,26 +1,53 @@
 /**
- * How much context the model has, read from llama.cpp's `GET /props`.
+ * What the model is served with, read from llama.cpp's `GET /props`.
  *
- * There is no standard for this: the OpenAI schema says nothing about a
- * model's context window, so an endpoint that doesn't volunteer the number
- * leaves a front end guessing. llama.cpp volunteers it —
- * `default_generation_settings.n_ctx` is the context of one slot, which is the
- * budget for a single request rather than the sum across `--parallel`, and so
- * exactly what a usage indicator should measure against.
+ * There is no standard for any of this. The OpenAI schema says nothing about a
+ * model's context window and nothing about the sampler settings a server was
+ * launched with, so an endpoint that doesn't volunteer them leaves a front end
+ * guessing. llama.cpp volunteers both, in `default_generation_settings`:
+ * `n_ctx` is the context of one slot, which is the budget for a single request
+ * rather than the sum across `--parallel`, and so exactly what a usage
+ * indicator should measure against; the rest is what a request that sets
+ * nothing will actually get.
  *
  * Anything that can't be established comes back as null, and the panel says
  * the size is unknown rather than showing a wrong one. An endpoint without
- * /props is the common case, not an error.
+ * /props is the common case, not an error — there, a sampler this plugin
+ * leaves unset is simply whatever the server chose, unseen.
  */
 import { requestUrl } from 'obsidian';
 import { describeRequestError, directRequest, withDirectRetry } from './node-http';
 
 interface ServerProps {
-	default_generation_settings?: { n_ctx?: number };
+	default_generation_settings?: {
+		n_ctx?: number;
+		temperature?: number;
+		presence_penalty?: number;
+		repeat_penalty?: number;
+	};
+}
+
+/**
+ * What the server was launched with.
+ *
+ * `default_generation_settings` is the whole sampler set `llama-server` will
+ * apply to a request that says nothing — the same thing llama.cpp's own UI
+ * seeds its controls from. This plugin leaves a sampler unset by default and
+ * sends nothing for it, so these are the values actually in force; showing them
+ * is what keeps "unset" from meaning "unknowable".
+ *
+ * Only the ones with a control here are read. `contextSize` is null when the
+ * endpoint would not say — see {@link serverContextSize}.
+ */
+export interface ServerDefaults {
+	contextSize: number | null;
+	temperature?: number;
+	presencePenalty?: number;
+	repeatPenalty?: number;
 }
 
 /** One lookup per endpoint and model, shared between callers, kept for the session. */
-const cache = new Map<string, Promise<number | null>>();
+const cache = new Map<string, Promise<ServerDefaults | null>>();
 
 /**
  * Endpoints that answered /props with a real context size.
@@ -55,9 +82,7 @@ function propsUrl(baseUrl: string, model: string): string {
 }
 
 /**
- * The context window `model` is served with, or null whenever that can't be
- * established — an endpoint without /props, a router speaking for itself
- * (`n_ctx: 0`), or any failure at all.
+ * What `model` is served with, or null whenever the endpoint would not say.
  *
  * A null is cached like any other answer, because this is asked again on every
  * settings change and an endpoint without /props would otherwise be re-asked
@@ -66,12 +91,12 @@ function propsUrl(baseUrl: string, model: string): string {
  * carries `autoload=false`) reports nothing until something loads it, and the
  * fact that it has just answered is the proof that something did.
  */
-export function serverContextSize(
+export function serverDefaults(
 	baseUrl: string,
 	apiKey: string,
 	model: string,
 	refresh = false,
-): Promise<number | null> {
+): Promise<ServerDefaults | null> {
 	const url = propsUrl(baseUrl, model);
 	if (refresh) cache.delete(url);
 	const hit = cache.get(url);
@@ -88,21 +113,41 @@ export function serverContextSize(
 		},
 		() => directRequest({ url, method: 'GET', headers }),
 	)
-		.then((res) => {
+		.then((res): ServerDefaults | null => {
 			if (res.status >= 400) return null;
 			const props = JSON.parse(res.text) as ServerProps;
-			const n = props?.default_generation_settings?.n_ctx;
-			if (typeof n !== 'number' || n <= 0) return null;
+			const defaults = props?.default_generation_settings;
+			if (!defaults) return null;
 			llamaCpp.add(url);
-			return n;
+			const n = defaults.n_ctx;
+			return {
+				contextSize: typeof n === 'number' && n > 0 ? n : null,
+				temperature: defaults.temperature,
+				presencePenalty: defaults.presence_penalty,
+				repeatPenalty: defaults.repeat_penalty,
+			};
 		})
 		.catch((e: unknown) => {
-			console.debug('[vault-assistant] No context size from', url, describeRequestError(e, url));
+			console.debug('[vault-assistant] No server defaults from', url, describeRequestError(e, url));
 			return null;
 		});
 
 	cache.set(url, lookup);
 	return lookup;
+}
+
+/**
+ * The context window `model` is served with, or null whenever that can't be
+ * established — an endpoint without /props, a router speaking for itself
+ * (`n_ctx: 0`), or any failure at all.
+ */
+export function serverContextSize(
+	baseUrl: string,
+	apiKey: string,
+	model: string,
+	refresh = false,
+): Promise<number | null> {
+	return serverDefaults(baseUrl, apiKey, model, refresh).then((d) => d?.contextSize ?? null);
 }
 
 /** Forget what an endpoint said, so a model or endpoint swap is picked up. */

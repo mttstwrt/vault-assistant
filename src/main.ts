@@ -15,6 +15,27 @@ import { WORKFLOW_PRESETS, presetToNote } from './workflows/presets';
 import { WorkflowRun, createRunNote, expandPlaceholders } from './workflows/runner';
 import { workflowToCanvas } from './workflows/canvas';
 
+/**
+ * Samplers used to be numbers that were always saved and, for temperature,
+ * always sent. They are now unset by default, so the endpoint's own sampling
+ * applies until the user chooses otherwise — but an install from before that
+ * carries the old numbers, and an always-saved default is indistinguishable
+ * from a choice.
+ *
+ * The values these clear meant "send nothing" already: presence 0 and
+ * repetition 1 were the off sentinels the request builder checked for, so
+ * dropping them changes no request. Temperature 0.7 is the same inference the
+ * system-prompt upgrade above makes — a value identical to the shipped default
+ * was never touched — and it is the one worth making, because a 0.7 nobody
+ * picked is exactly what was overruling `llama-server --temp`. Anyone who did
+ * choose 0.7 types it again and it stays.
+ */
+function unsetLegacySamplers(s: VaultAssistantSettings): void {
+	if (s.temperature === 0.7) s.temperature = null;
+	if (s.presencePenalty === 0) s.presencePenalty = null;
+	if (s.repetitionPenalty === 1) s.repetitionPenalty = null;
+}
+
 /** Check the schedule this often; the real cadence lives in settings. */
 const SCHEDULE_TICK_MS = 15 * 60 * 1000;
 /** Rotate to a fresh run note after this many rounds, so notes stay readable. */
@@ -294,6 +315,7 @@ export default class VaultAssistantPlugin extends Plugin {
 		if (LEGACY_SYSTEM_PROMPTS.includes(this.settings.systemPrompt)) {
 			this.settings.systemPrompt = DEFAULT_SYSTEM_PROMPT;
 		}
+		unsetLegacySamplers(this.settings);
 		// Seed the Life Tracker integration once, disabled, so wiring it up is
 		// a single toggle. Seeded exactly once — deleting it is respected.
 		if (!this.settings.seededLifeTrackerServer) {
