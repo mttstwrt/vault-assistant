@@ -10,6 +10,7 @@ import {
 	TranscriptEntry,
 } from '../types';
 import { describeDecision } from '../transcript';
+import { DiffSegment, wordDiff } from './diff';
 
 /**
  * A vault path as an Obsidian internal link.
@@ -263,11 +264,32 @@ function renderCounts(parent: HTMLElement, diff: SerializedDiff): void {
 	if (diff.removed) counts.createSpan({ cls: 'va-diff-del-text', text: `−${diff.removed}` });
 }
 
+/** One diff row, with the parts that changed inside it picked out. */
+function renderDiffLine(parent: HTMLElement, cls: string, mark: string, segments: DiffSegment[] | null, text: string): void {
+	const row = parent.createDiv({ cls: `va-diff-line ${cls}` });
+	if (!segments) {
+		row.setText(text);
+		return;
+	}
+	row.appendText(mark);
+	for (const seg of segments) {
+		if (seg.changed) row.createSpan({ cls: 'va-diff-seg', text: seg.text });
+		else row.appendText(seg.text);
+	}
+}
+
 /**
  * Draw the diff: its own lines decide their colour, by the "+", "-" and "⋯"
  * prefixes a unified diff already carries. Reading the marks back rather than
  * keeping a parallel structure is what lets a reopened conversation draw the
  * same card as the live one, from the text the transcript kept.
+ *
+ * A removed line and the added line that replaced it are diffed against each
+ * other again, by word, so a one-word edit reads as a one-word edit instead of
+ * a whole line thrown away and a whole line written. That pairing is inferred
+ * here rather than stored: in a unified diff a changed line is a "-" run
+ * immediately followed by a "+" run, which is the same thing git reads to draw
+ * the same highlight.
  */
 function renderDiffBody(parent: HTMLElement, diff: SerializedDiff): void {
 	const body = parent.createDiv({ cls: 'va-diff' });
@@ -279,18 +301,45 @@ function renderDiffBody(parent: HTMLElement, diff: SerializedDiff): void {
 		return;
 	}
 
+	const lines = diff.body ? diff.body.split('\n') : [];
 	let drawn = 0;
-	for (const line of diff.body ? diff.body.split('\n') : []) {
-		if (drawn >= MAX_DIFF_ROWS) break;
+	let i = 0;
+	while (i < lines.length && drawn < MAX_DIFF_ROWS) {
+		const line = lines[i] ?? '';
 		if (line === '⋯') {
 			body.createDiv({ cls: 'va-diff-gap', text: '⋯' });
+			i++;
 			continue;
 		}
-		drawn++;
-		const mark = line[0];
-		const cls =
-			mark === '+' ? 'va-diff-add' : mark === '-' ? 'va-diff-del' : 'va-diff-ctx';
-		body.createDiv({ cls: `va-diff-line ${cls}`, text: line });
+		if (line[0] !== '-') {
+			drawn++;
+			const cls = line[0] === '+' ? 'va-diff-add' : 'va-diff-ctx';
+			body.createDiv({ cls: `va-diff-line ${cls}`, text: line });
+			i++;
+			continue;
+		}
+
+		// A run of removals, then the run of additions that replaced it.
+		const removed: string[] = [];
+		while (i < lines.length && lines[i]?.[0] === '-') removed.push(lines[i++] ?? '');
+		const added: string[] = [];
+		while (i < lines.length && lines[i]?.[0] === '+') added.push(lines[i++] ?? '');
+
+		// Pair them by position: the nth line removed became the nth written.
+		// Lines with no counterpart are a plain deletion or addition.
+		const pairs = Math.min(removed.length, added.length);
+		const inner = Array.from({ length: pairs }, (_, n) =>
+			wordDiff((removed[n] ?? '').slice(1), (added[n] ?? '').slice(1)),
+		);
+
+		removed.forEach((text, n) => {
+			if (drawn++ >= MAX_DIFF_ROWS) return;
+			renderDiffLine(body, 'va-diff-del', '-', inner[n]?.before ?? null, text);
+		});
+		added.forEach((text, n) => {
+			if (drawn++ >= MAX_DIFF_ROWS) return;
+			renderDiffLine(body, 'va-diff-add', '+', inner[n]?.after ?? null, text);
+		});
 	}
 	if (drawn >= MAX_DIFF_ROWS) {
 		body.createDiv({ cls: 'va-diff-note', text: '…rest of the diff not shown.' });

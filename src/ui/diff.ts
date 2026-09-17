@@ -114,6 +114,76 @@ function toHunks(lines: DiffLine[]): DiffHunk[] {
 	return hunks;
 }
 
+/** A run of text within a changed line, and whether that run is what changed. */
+export interface DiffSegment {
+	text: string;
+	changed: boolean;
+}
+
+/** Longest line pair worth diffing by word; beyond this the table is not worth building. */
+const MAX_WORD_TOKENS = 400;
+/**
+ * How much two lines must still share to be treated as an edit of one another
+ * rather than a replacement. Below this, nearly every token is "changed" and
+ * highlighting says only what the red and green already said — worse than
+ * nothing, because it looks like information.
+ */
+const MIN_SIMILARITY = 0.25;
+
+/** Words, whitespace and punctuation as separate tokens, so edits land on word boundaries. */
+function tokenize(line: string): string[] {
+	return line.match(/\s+|[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]+/gu) ?? [];
+}
+
+/** Join neighbouring tokens that agree, so the DOM gets one span per run. */
+function coalesce(parts: { text: string; changed: boolean }[]): DiffSegment[] {
+	const out: DiffSegment[] = [];
+	for (const part of parts) {
+		if (!part.text) continue;
+		const last = out[out.length - 1];
+		if (last && last.changed === part.changed) last.text += part.text;
+		else out.push({ text: part.text, changed: part.changed });
+	}
+	return out;
+}
+
+/**
+ * What changed *within* a pair of lines — the highlight git and Obsidian both
+ * draw inside a red or green row, so a one-word edit reads as a one-word edit
+ * rather than as a whole line replaced.
+ *
+ * Returns null when the pair should be left alone: too long to diff cheaply, or
+ * too dissimilar for the answer to mean anything (see MIN_SIMILARITY).
+ */
+export function wordDiff(
+	before: string,
+	after: string,
+): { before: DiffSegment[]; after: DiffSegment[] } | null {
+	if (!before || !after || before === after) return null;
+	const a = tokenize(before);
+	const b = tokenize(after);
+	if (a.length > MAX_WORD_TOKENS || b.length > MAX_WORD_TOKENS) return null;
+
+	const edits = lcsEdits(a, b);
+	const shared = edits
+		.filter((e) => e.kind === 'context')
+		.reduce((n, e) => n + e.text.trim().length, 0);
+	if (shared < Math.max(before.trim().length, after.trim().length) * MIN_SIMILARITY) return null;
+
+	return {
+		before: coalesce(
+			edits
+				.filter((e) => e.kind !== 'add')
+				.map((e) => ({ text: e.text, changed: e.kind === 'remove' })),
+		),
+		after: coalesce(
+			edits
+				.filter((e) => e.kind !== 'remove')
+				.map((e) => ({ text: e.text, changed: e.kind === 'add' })),
+		),
+	};
+}
+
 /** Diff two versions of a file, line by line. */
 export function diffLines(before: string, after: string): FileDiff {
 	const a = splitLines(before);

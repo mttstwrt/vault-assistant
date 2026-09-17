@@ -344,6 +344,21 @@ span.va-path {
 	background: rgba(var(--color-red-rgb), 0.12);
 }
 
+/* The part of a changed line that actually changed, the way git and Obsidian's
+   own diff mark it: the row carries the side's colour, this carries the edit. */
+.va-diff-seg {
+	border-radius: 3px;
+	padding: 0 1px;
+}
+.va-diff-add .va-diff-seg {
+	background: var(--text-success);
+	color: var(--background-primary);
+}
+.va-diff-del .va-diff-seg {
+	background: var(--text-error);
+	color: var(--background-primary);
+}
+
 .va-diff-gap {
 	padding: 0 8px;
 	color: var(--text-faint);
