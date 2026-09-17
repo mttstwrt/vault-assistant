@@ -20,7 +20,12 @@ export interface StreamEvents {
 }
 
 export interface AgentEvents {
-	onAssistant(content: string): void;
+	/**
+	 * A finished, non-streamed turn. `reasoning` is what the model thought on
+	 * the way there: shown and recorded, never sent back. The streaming path
+	 * reports both through `stream` instead.
+	 */
+	onAssistant(content: string, reasoning?: string): void;
 	onToolCall(call: ToolCall): void;
 	onToolResult(call: ToolCall, result: string): void;
 	onError(message: string): void;
@@ -167,7 +172,9 @@ export async function runAgent(
 			toolCalls: result.toolCalls.length ? result.toolCalls : undefined,
 		});
 
-		if (!stream && result.content) events.onAssistant(result.content);
+		if (!stream && (result.content || result.reasoning)) {
+			events.onAssistant(result.content, result.reasoning);
+		}
 
 		if (result.toolCalls.length === 0) return history;
 

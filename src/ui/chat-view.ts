@@ -13,14 +13,25 @@ import type VaultAssistantPlugin from '../main';
 import { CallStats } from '../api/client';
 import { serverContextSize } from '../api/props';
 import { ModelEntry, filterModels, listModels, modelOptionLabel } from '../api/models';
-import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
+import {
+	ApprovalRequest,
+	ApprovalResult,
+	ChatMessage,
+	FileChange,
+	ExpansionSummary,
+	ToolCall,
+	TranscriptEntry,
+	TurnStats,
+} from '../types';
+import { serializeDiff, toMessages } from '../transcript';
+import { diffLines } from './diff';
 import { runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
 import {
 	appendConversation,
 	conversationFolders,
 	newConversationPath,
-	parseConversation,
+	openTranscript,
 	saveConversation,
 } from '../conversation';
 import { ConversationPicker } from './conversation-modal';
@@ -28,14 +39,14 @@ import { ImportModal } from './import-modal';
 import { WorkflowModal, WorkflowStart } from './workflow-modal';
 import { WorkflowRun, createRunNote } from '../workflows/runner';
 import { prepareContext, stripPrePass } from '../prepass';
-import { expandWikilinks } from '../wikilinks';
+import { Expansion, expandWikilinks } from '../wikilinks';
 import { Filing, suggestFiling } from '../filing';
 import { buildOpenFilesBlock, stripOpenFiles } from '../tools/workspace';
 import { AssistantTurn } from './assistant-turn';
 import { fitToContent } from './autogrow';
 import { ContextRing } from './context-ring';
 import {
-	addAssistantBubble,
+	addApprovalRecord,
 	addDiffPreview,
 	addError,
 	addFileChange,
@@ -46,7 +57,7 @@ import {
 	markPreviewApplied,
 	prettyJson,
 	addExpansionNote,
-	addStats,
+	addAssistantTurn,
 	createPathLink,
 } from './message-render';
 
@@ -57,11 +68,53 @@ const PLACEHOLDER = 'Ask about your vault…  (Enter to send, Shift+Enter for ne
 /** How close to the bottom still counts as "following the output", in pixels. */
 const FOLLOW_SLACK = 32;
 
+/** Endpoint stats in the shape a transcript keeps, dropping what it does not. */
+function toTurnStats(stats: CallStats | undefined): TurnStats | undefined {
+	if (!stats) return undefined;
+	return {
+		elapsedMs: stats.elapsedMs,
+		completionTokens: stats.completionTokens,
+		tokensPerSecond: stats.tokensPerSecond,
+	};
+}
+
+/**
+ * What the [[link]] expander did, reduced to what the record needs. The text it
+ * attached is already in the message; this is the note under the bubble saying
+ * so, which a reopened conversation has to be able to draw again.
+ */
+function summariseExpansion(e: Expansion): ExpansionSummary | undefined {
+	if (!e.inlined.length && !e.missed.length && !e.blocked.length && !e.deferred.length) {
+		return undefined;
+	}
+	return {
+		inlined: e.inlined.map((i) => {
+			const hash = i.link.indexOf('#');
+			return {
+				path: i.path,
+				subpath: hash === -1 ? '' : i.link.slice(hash),
+				label: i.label,
+				chars: i.chars,
+			};
+		}),
+		missed: e.missed,
+		blocked: e.blocked.length,
+		deferred: e.deferred,
+	};
+}
+
 export class ChatView extends ItemView {
 	private plugin: VaultAssistantPlugin;
-	private history: ChatMessage[] = [];
+	/**
+	 * Everything the panel has shown, in order — the conversation itself. The
+	 * message list the endpoint receives is projected from this each turn (see
+	 * transcript.toMessages), so there is one record instead of two that drift.
+	 */
+	private entries: TranscriptEntry[] = [];
+	/** Rebuilt per conversation; not part of the record, so never persisted. */
+	private systemPrompt = '';
 	private conversationPath: string | null = null;
-	/** How many history entries are already saved in a reopened conversation's file. */
+	/** How many entries are already written to a reopened conversation's file. */
 	private persistedCount = 0;
 	private busy = false;
 
@@ -392,7 +445,7 @@ export class ChatView extends ItemView {
 		}
 		// The transcript is what travels, so without one the new window starts
 		// a fresh conversation. Say so rather than silently dropping it.
-		if (!this.conversationPath && this.history.length > 1) {
+		if (!this.conversationPath && this.entries.length) {
 			new Notice(
 				'This conversation has not been saved, so it cannot follow the panel to a new window. Save it first.',
 			);
@@ -477,7 +530,8 @@ export class ChatView extends ItemView {
 	 */
 	private async clearConversation(): Promise<void> {
 		this.cancelPendingApprovals();
-		this.history = [{ role: 'system', content: await buildSystemPrompt(this.app, this.plugin.settings) }];
+		this.systemPrompt = await buildSystemPrompt(this.app, this.plugin.settings);
+		this.entries = [];
 		this.conversationPath = null;
 		this.persistedCount = 0;
 		this.lastStats = null;
@@ -507,25 +561,63 @@ export class ChatView extends ItemView {
 			this.busyNotice();
 			return;
 		}
-		this.cancelPendingApprovals();
-		const systemPrompt = await buildSystemPrompt(this.app, this.plugin.settings);
-		const messages = parseConversation(await this.app.vault.cachedRead(file));
-		this.history = [{ role: 'system', content: systemPrompt }, ...messages];
+		await this.clearConversation();
+		this.entries = openTranscript(await this.app.vault.cachedRead(file));
 		this.conversationPath = file.path;
-		this.persistedCount = this.history.length;
-		this.toolEls.clear();
-		this.sessionWrites.clear();
-		this.sessionMcp.clear();
-		this.messagesEl.empty();
-		this.followOutput = true;
-		this.ring.reset();
+		this.persistedCount = this.entries.length;
 		const resumed = addInfo(this.messagesEl, 'Continuing ');
 		createPathLink(this.app, resumed, file.path, file.basename);
-		for (const m of messages) {
-			if (m.role === 'user') addUserBubble(this.messagesEl, m.content);
-			else if (m.role === 'assistant') await this.addAssistantBubble(m.content);
-		}
+		await this.renderEntries(this.entries);
 		this.scrollToBottom(true);
+	}
+
+	/**
+	 * Redraw the panel from the record. The same functions the live conversation
+	 * calls, in the same order, so a reopened conversation looks like the one you
+	 * closed rather than a summary of it.
+	 */
+	private async renderEntries(entries: TranscriptEntry[]): Promise<void> {
+		for (const entry of entries) {
+			switch (entry.kind) {
+				case 'user': {
+					const bubble = addUserBubble(this.messagesEl, entry.text);
+					if (entry.attached) addExpansionNote(this.app, bubble, entry.attached);
+					break;
+				}
+				case 'assistant': {
+					if (!entry.text.trim() && !entry.reasoning) break;
+					await addAssistantTurn(this.app, this, this.messagesEl, entry);
+					break;
+				}
+				case 'tool': {
+					const details = addToolCall(this.messagesEl, entry.call);
+					addToolResult(details, entry.result);
+					break;
+				}
+				case 'change':
+					addFileChange(this.app, this.messagesEl, entry);
+					break;
+				case 'approval':
+					addApprovalRecord(this.app, this.messagesEl, entry.request, entry.decision);
+					break;
+				case 'error':
+					addError(this.messagesEl, entry.message);
+					break;
+			}
+		}
+	}
+
+	/**
+	 * Append to the record.
+	 *
+	 * A workflow run is shown here but is not this conversation: its memory is
+	 * the run note, it builds its own per-round history, and none of it should
+	 * become context for whatever you type in the panel afterwards. So a run
+	 * draws without recording.
+	 */
+	private record(entry: TranscriptEntry): void {
+		if (this.workflowRun) return;
+		this.entries.push(entry);
 	}
 
 	/** Resolve any approval prompts still awaiting a click as denials. */
@@ -576,7 +668,13 @@ export class ChatView extends ItemView {
 				});
 				createPathLink(this.app, card.createEl('code', { cls: 'va-approval-path' }), req.path ?? '');
 				// Decide on the actual change, not just the path.
-				if (req.preview) preview = addDiffPreview(card, req.preview.before, req.preview.after);
+				if (req.preview) {
+					preview = addDiffPreview(
+						card,
+						serializeDiff(diffLines(req.preview.before, req.preview.after)),
+						!req.preview.before,
+					);
+				}
 			}
 
 			const row = card.createDiv({ cls: 'va-approval-actions' });
@@ -590,6 +688,9 @@ export class ChatView extends ItemView {
 				row.empty();
 				card.addClass('va-approval-done');
 				card.createDiv({ cls: 'va-approval-choice', text: `→ ${label}` });
+				// What you allowed is part of what happened, so it is recorded
+				// rather than living only on the card that asked.
+				this.record({ kind: 'approval', request: req, decision: result });
 				this.scrollToBottom();
 				resolve(result);
 			};
@@ -635,9 +736,15 @@ export class ChatView extends ItemView {
 	 * endpoint", which is what earns the stats line a streamed turn gets from
 	 * AssistantTurn; a replayed transcript carries no timings to report.
 	 */
-	private async addAssistantBubble(markdown: string, live = false): Promise<void> {
-		const bubble = await addAssistantBubble(this.app, this, this.messagesEl, markdown);
-		if (live && this.lastStats) addStats(bubble, { stats: this.lastStats, aborted: false });
+	private async addAssistantBubble(markdown: string, reasoning?: string): Promise<void> {
+		const entry: TranscriptEntry = {
+			kind: 'assistant',
+			text: markdown,
+			reasoning: reasoning || undefined,
+			stats: toTurnStats(this.lastStats ?? undefined),
+		};
+		this.record(entry);
+		await addAssistantTurn(this.app, this, this.messagesEl, entry);
 		this.scrollToBottom();
 	}
 
@@ -648,6 +755,10 @@ export class ChatView extends ItemView {
 	}
 
 	private addToolResult(call: ToolCall, result: string): void {
+		// The full result, not the truncated view of it: this is the model's
+		// context on the next turn, so shortening it here would change the
+		// conversation rather than how it is drawn.
+		this.record({ kind: 'tool', call, result });
 		const details = this.toolEls.get(call.id);
 		if (!details) return;
 		addToolResult(details, result);
@@ -655,20 +766,36 @@ export class ChatView extends ItemView {
 		this.scrollToBottom();
 	}
 
-	/** Show what a write actually changed, as a diff. */
+	/**
+	 * Show what a write actually changed, as a diff.
+	 *
+	 * The diff is computed once, here, and kept in that form: it is what was on
+	 * screen, and the file's before and after are not — storing those would put
+	 * a second copy of every note the agent touches into the conversations
+	 * folder, and they cannot be recovered when the note changes again.
+	 */
 	private addFileChange(change: FileChange): void {
+		const entry: TranscriptEntry = {
+			kind: 'change',
+			path: change.path,
+			change: change.kind,
+			diff: serializeDiff(diffLines(change.before, change.after)),
+		};
+		this.record(entry);
+
 		const approved = this.approvedWrite;
 		if (approved && approved.path === change.path && approved.after === change.after) {
 			// This is the write the approval card already previewed.
-			markPreviewApplied(this.app, approved.card, change);
+			markPreviewApplied(this.app, approved.card, entry);
 			this.approvedWrite = null;
 			return;
 		}
-		addFileChange(this.app, this.messagesEl, change);
+		addFileChange(this.app, this.messagesEl, entry);
 		this.scrollToBottom();
 	}
 
 	private addError(message: string): void {
+		this.record({ kind: 'error', message });
 		addError(this.messagesEl, message);
 		this.scrollToBottom();
 	}
@@ -723,9 +850,9 @@ export class ChatView extends ItemView {
 
 	/** The most recent assistant answer in this conversation, if any. */
 	private lastAssistantContent(): string {
-		for (let i = this.history.length - 1; i >= 0; i--) {
-			const m = this.history[i];
-			if (m?.role === 'assistant' && m.content.trim()) return m.content;
+		for (let i = this.entries.length - 1; i >= 0; i--) {
+			const e = this.entries[i];
+			if (e?.kind === 'assistant' && e.text.trim()) return e.text;
 		}
 		return '';
 	}
@@ -756,27 +883,32 @@ export class ChatView extends ItemView {
 		const expansion = this.plugin.settings.expandTypedLinks
 			? await expandWikilinks(this.app, this.plugin.settings, text, this.linkSourcePath())
 			: null;
-		if (expansion) {
-			addExpansionNote(this.app, bubble, expansion);
+		const attached = expansion ? summariseExpansion(expansion) : undefined;
+		if (attached) {
+			addExpansionNote(this.app, bubble, attached);
 			this.scrollToBottom();
 		}
-		this.history.push({ role: 'user', content: text + (expansion?.block ?? '') });
+		this.record({ kind: 'user', text, block: expansion?.block || undefined, attached });
 
-		const system = this.history[0];
-		if (system?.role === 'system') {
-			// Both blocks are rebuilt from scratch each turn, so stale tabs and
-			// last turn's pre-fetched context never pile up. Order matters: the
-			// strippers cut from their marker to the end.
-			let content = stripOpenFiles(stripPrePass(system.content));
-			content += buildOpenFilesBlock(this.app, this.plugin.settings);
-			if (this.plugin.settings.usePrePass && !abort.signal.aborted) {
-				this.setStatus('Preparing context…');
-				const block = await prepareContext(this.app, this.plugin.settings, this.plugin.rag, text);
-				if (block) content += block;
-				this.setStatus('Thinking…');
-			}
-			this.history[0] = { role: 'system', content };
+		// Both blocks are rebuilt from scratch each turn, so stale tabs and last
+		// turn's pre-fetched context never pile up. Order matters: the strippers
+		// cut from their marker to the end.
+		let system = stripOpenFiles(stripPrePass(this.systemPrompt));
+		system += buildOpenFilesBlock(this.app, this.plugin.settings);
+		if (this.plugin.settings.usePrePass && !abort.signal.aborted) {
+			this.setStatus('Preparing context…');
+			const block = await prepareContext(this.app, this.plugin.settings, this.plugin.rag, text);
+			if (block) system += block;
+			this.setStatus('Thinking…');
 		}
+
+		// The wire history is derived rather than kept: one record, projected
+		// for the endpoint each turn. runAgent appends to this array as it runs,
+		// and those turns reach the record through the events below.
+		const history: ChatMessage[] = [
+			{ role: 'system', content: system },
+			...toMessages(this.entries),
+		];
 
 		/** Set when a streamed turn already showed that it was cut short. */
 		let stopShown = false;
@@ -790,9 +922,9 @@ export class ChatView extends ItemView {
 				this.plugin.rag,
 				this.sessionWrites,
 				this.sessionMcp,
-				this.history,
+				history,
 				{
-					onAssistant: (c) => void this.addAssistantBubble(c, true),
+					onAssistant: (c, reasoning) => void this.addAssistantBubble(c, reasoning),
 					onToolCall: (call) => this.addToolCall(call),
 					onToolResult: (call, res) => this.addToolResult(call, res),
 					onError: (msg) => this.addError(msg),
@@ -819,6 +951,15 @@ export class ChatView extends ItemView {
 							this.turn = null;
 							if (!turn) return;
 							if (info.aborted && turn.hasOutput()) stopShown = true;
+							const { text, reasoning, thoughtMs } = turn.record();
+							this.record({
+								kind: 'assistant',
+								text,
+								reasoning,
+								thoughtMs,
+								stats: toTurnStats(info.stats),
+								aborted: info.aborted || undefined,
+							});
 							void turn.finish(info);
 						},
 					},
@@ -828,6 +969,7 @@ export class ChatView extends ItemView {
 		}
 
 		if (abort.signal.aborted && !stopShown) addInfo(this.messagesEl, 'Stopped.');
+		this.lastStats = null;
 
 		// A conversation that already has a file keeps it current, whatever
 		// auto-save says: the setting decides whether a transcript is created
@@ -856,7 +998,8 @@ export class ChatView extends ItemView {
 
 	/** The message that opened this conversation — what names and files it. */
 	private firstUserMessage(): string {
-		return this.history.find((m) => m.role === 'user')?.content ?? '';
+		const first = this.entries.find((e) => e.kind === 'user');
+		return first?.kind === 'user' ? first.text : '';
 	}
 
 	/**
@@ -877,13 +1020,13 @@ export class ChatView extends ItemView {
 		}
 		try {
 			if (this.persistedCount > 0) {
-				// Reopened conversation: append only the new turns, so the
-				// original file is preserved as saved.
-				await appendConversation(this.app, path, this.history.slice(this.persistedCount));
-				this.persistedCount = this.history.length;
+				// Reopened conversation: append only what is new, so the original
+				// file is preserved as saved.
+				await appendConversation(this.app, path, this.entries.slice(this.persistedCount));
 			} else {
-				await saveConversation(this.app, this.plugin.settings, path, this.history);
+				await saveConversation(this.app, this.plugin.settings, path, this.entries);
 			}
+			this.persistedCount = this.entries.length;
 			return path;
 		} catch (e) {
 			new Notice(`Could not save conversation: ${e instanceof Error ? e.message : String(e)}`);
@@ -969,7 +1112,7 @@ export class ChatView extends ItemView {
 			start.workflow,
 			{ path, maxRounds: start.maxRounds, delaySeconds: start.delaySeconds },
 			{
-				onAssistant: (c) => void this.addAssistantBubble(c, true),
+				onAssistant: (c, reasoning) => void this.addAssistantBubble(c, reasoning),
 				onToolCall: (call) => this.addToolCall(call),
 				onToolResult: (call, res) => this.addToolResult(call, res),
 				onError: (msg) => this.addError(msg),

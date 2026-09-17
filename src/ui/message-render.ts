@@ -1,9 +1,15 @@
 /** Rendering helpers shared by the chat panel and its streaming turns. */
 import { App, Component, MarkdownRenderer, Notice, TFile, setIcon } from 'obsidian';
-import { CallStats } from '../api/client';
-import { FileChange, ToolCall } from '../types';
-import { Expansion } from '../wikilinks';
-import { FileDiff, diffLines } from './diff';
+import { TurnStats } from '../types';
+import {
+	ApprovalRequest,
+	ApprovalResult,
+	ExpansionSummary,
+	SerializedDiff,
+	ToolCall,
+	TranscriptEntry,
+} from '../types';
+import { describeDecision } from '../transcript';
 
 /**
  * A vault path as an Obsidian internal link.
@@ -41,7 +47,7 @@ export function createPathLink(
  * that volunteers timings says the same thing whichever way it was called.
  * Empty when there is nothing to report.
  */
-export function statsFooter(info: { stats?: CallStats; aborted: boolean }): string {
+export function statsFooter(info: { stats?: TurnStats; aborted: boolean }): string {
 	const parts: string[] = [];
 	if (info.aborted) parts.push('Stopped');
 	const s = info.stats;
@@ -54,7 +60,7 @@ export function statsFooter(info: { stats?: CallStats; aborted: boolean }): stri
 }
 
 /** Add the stats line to a finished bubble, when there is anything to say. */
-export function addStats(bubble: HTMLElement, info: { stats?: CallStats; aborted: boolean }): void {
+export function addStats(bubble: HTMLElement, info: { stats?: TurnStats; aborted: boolean }): void {
 	const text = statsFooter(info);
 	if (text) bubble.createDiv({ cls: 'va-stats', text });
 }
@@ -121,8 +127,8 @@ export function addUserBubble(parent: HTMLElement, text: string): HTMLElement {
  * note named here is a link to the note itself, and checking what was sent is
  * a click rather than a search.
  */
-export function addExpansionNote(app: App, bubble: HTMLElement, e: Expansion): void {
-	if (!e.inlined.length && !e.missed.length && !e.blocked.length && !e.deferred.length) return;
+export function addExpansionNote(app: App, bubble: HTMLElement, e: ExpansionSummary): void {
+	if (!e.inlined.length && !e.missed.length && !e.blocked && !e.deferred.length) return;
 	const note = bubble.createDiv({ cls: 'va-inlined' });
 	const row = (): HTMLElement => {
 		const line = note.createDiv();
@@ -136,8 +142,7 @@ export function addExpansionNote(app: App, bubble: HTMLElement, e: Expansion): v
 		line.appendText('inlined ');
 		e.inlined.forEach((i, n) => {
 			if (n) line.appendText(' · ');
-			const hash = i.link.indexOf('#');
-			createPathLink(app, line, hash === -1 ? i.path : `${i.path}${i.link.slice(hash)}`);
+			createPathLink(app, line, `${i.path}${i.subpath}`);
 		});
 		line.appendText(` (${(chars / 1000).toFixed(1)}k)`);
 	}
@@ -152,11 +157,11 @@ export function addExpansionNote(app: App, bubble: HTMLElement, e: Expansion): v
 		}
 	}
 
-	if (e.blocked.length) {
+	if (e.blocked) {
 		row().appendText(
-			e.blocked.length === 1
+			e.blocked === 1
 				? '1 link is in a blocked folder — not attached'
-				: `${e.blocked.length} links are in blocked folders — not attached`,
+				: `${e.blocked} links are in blocked folders — not attached`,
 		);
 	}
 
@@ -165,16 +170,66 @@ export function addExpansionNote(app: App, bubble: HTMLElement, e: Expansion): v
 	}
 }
 
-/** A finished assistant message, rendered as markdown (saved transcripts, non-streamed turns). */
-export async function addAssistantBubble(
+/** An assistant turn as the record holds it: thinking, answer, and what it cost. */
+export type AssistantEntry = Extract<TranscriptEntry, { kind: 'assistant' }>;
+
+/**
+ * A finished assistant turn — the one renderer for every turn the panel did not
+ * stream itself: a buffered answer, and every turn of a reopened conversation.
+ * Streaming builds the same shape incrementally in ./assistant-turn.
+ */
+export async function addAssistantTurn(
 	app: App,
 	component: Component,
 	parent: HTMLElement,
-	markdown: string,
+	entry: AssistantEntry,
 ): Promise<HTMLElement> {
-	const { bubble, content } = createBubble(parent, 'assistant', () => markdown);
-	await MarkdownRenderer.render(app, markdown, content, '', component);
+	const { bubble, content } = createBubble(parent, 'assistant', () => entry.text);
+	if (entry.reasoning) {
+		const think = bubble.createEl('details', { cls: 'va-think' });
+		const summary = think.createEl('summary');
+		setIcon(summary.createSpan({ cls: 'va-think-icon' }), 'brain');
+		summary.createSpan({
+			cls: 'va-think-label',
+			text: entry.thoughtMs
+				? `Thought for ${(entry.thoughtMs / 1000).toFixed(1)}s`
+				: 'Thinking',
+		});
+		think.createDiv({ cls: 'va-think-body', text: entry.reasoning });
+		// The thinking section belongs above the answer it produced.
+		bubble.insertBefore(think, content);
+	}
+	if (entry.text) await MarkdownRenderer.render(app, entry.text, content, '', component);
+	addStats(bubble, { stats: entry.stats, aborted: entry.aborted === true });
 	return bubble;
+}
+
+/**
+ * An approval that has already been answered, as a reopened conversation shows
+ * it. The live card is interactive and becomes this once it settles; here there
+ * is nothing left to decide, only the record of what was decided.
+ */
+export function addApprovalRecord(
+	app: App,
+	parent: HTMLElement,
+	request: ApprovalRequest,
+	decision: ApprovalResult,
+): HTMLElement {
+	const card = parent.createDiv({ cls: 'va-approval va-approval-done' });
+	const head = card.createDiv({ cls: 'va-approval-head' });
+	setIcon(head.createSpan({ cls: 'va-approval-icon' }), 'shield-alert');
+	head.createSpan({ text: request.kind === 'mcp' ? ' External tool call' : ' Approval required' });
+	card.createDiv({ cls: 'va-approval-body', text: `via ${request.tool}` });
+	if (request.path) {
+		const line = card.createEl('code', { cls: 'va-approval-path' });
+		createPathLink(app, line, request.path);
+		if (request.toPath) {
+			line.appendText('  →  ');
+			createPathLink(app, line, request.toPath);
+		}
+	}
+	card.createDiv({ cls: 'va-approval-choice', text: `→ ${describeDecision(decision)}` });
+	return card;
 }
 
 export function addToolCall(parent: HTMLElement, call: ToolCall): HTMLElement {
@@ -186,10 +241,13 @@ export function addToolCall(parent: HTMLElement, call: ToolCall): HTMLElement {
 	return details;
 }
 
+/** A write, as the transcript records it. */
+export type ChangeEntry = Extract<TranscriptEntry, { kind: 'change' }>;
+
 /** "Updated <path>", with the path as a link to the note it names. */
-function setChangeLabel(app: App, label: HTMLElement, change: FileChange): void {
+function setChangeLabel(app: App, label: HTMLElement, change: ChangeEntry): void {
 	label.empty();
-	label.appendText(`${change.kind === 'create' ? 'Created' : 'Updated'} `);
+	label.appendText(`${change.change === 'create' ? 'Created' : 'Updated'} `);
 	createPathLink(app, label, change.path);
 }
 
@@ -199,14 +257,19 @@ const MAX_DIFF_ROWS = 400;
 const OPEN_BELOW = 24;
 
 /** "+12 −3", coloured, for a diff's header. */
-function renderCounts(parent: HTMLElement, diff: FileDiff): void {
+function renderCounts(parent: HTMLElement, diff: SerializedDiff): void {
 	const counts = parent.createSpan({ cls: 'va-change-counts' });
 	if (diff.added) counts.createSpan({ cls: 'va-diff-add-text', text: `+${diff.added}` });
 	if (diff.removed) counts.createSpan({ cls: 'va-diff-del-text', text: `−${diff.removed}` });
 }
 
-/** Draw the diff itself: hunks, the gaps between them, and the caps. */
-function renderDiffBody(parent: HTMLElement, diff: FileDiff): void {
+/**
+ * Draw the diff: its own lines decide their colour, by the "+", "-" and "⋯"
+ * prefixes a unified diff already carries. Reading the marks back rather than
+ * keeping a parallel structure is what lets a reopened conversation draw the
+ * same card as the live one, from the text the transcript kept.
+ */
+function renderDiffBody(parent: HTMLElement, diff: SerializedDiff): void {
 	const body = parent.createDiv({ cls: 'va-diff' });
 	if (diff.truncated) {
 		body.createDiv({
@@ -217,16 +280,17 @@ function renderDiffBody(parent: HTMLElement, diff: FileDiff): void {
 	}
 
 	let drawn = 0;
-	for (const hunk of diff.hunks) {
+	for (const line of diff.body ? diff.body.split('\n') : []) {
 		if (drawn >= MAX_DIFF_ROWS) break;
-		if (hunk.gapBefore) body.createDiv({ cls: 'va-diff-gap', text: '⋯' });
-		for (const line of hunk.lines) {
-			if (drawn++ >= MAX_DIFF_ROWS) break;
-			const cls =
-				line.kind === 'add' ? 'va-diff-add' : line.kind === 'remove' ? 'va-diff-del' : 'va-diff-ctx';
-			const mark = line.kind === 'add' ? '+' : line.kind === 'remove' ? '-' : ' ';
-			body.createDiv({ cls: `va-diff-line ${cls}`, text: `${mark}${line.text}` });
+		if (line === '⋯') {
+			body.createDiv({ cls: 'va-diff-gap', text: '⋯' });
+			continue;
 		}
+		drawn++;
+		const mark = line[0];
+		const cls =
+			mark === '+' ? 'va-diff-add' : mark === '-' ? 'va-diff-del' : 'va-diff-ctx';
+		body.createDiv({ cls: `va-diff-line ${cls}`, text: line });
 	}
 	if (drawn >= MAX_DIFF_ROWS) {
 		body.createDiv({ cls: 'va-diff-note', text: '…rest of the diff not shown.' });
@@ -237,15 +301,15 @@ function renderDiffBody(parent: HTMLElement, diff: FileDiff): void {
  * A write, shown as a diff: green additions, red removals, a little context.
  * Small changes are expanded; larger ones collapse behind their line counts.
  */
-export function addFileChange(app: App, parent: HTMLElement, change: FileChange): HTMLElement {
-	const diff = diffLines(change.before, change.after);
+export function addFileChange(app: App, parent: HTMLElement, change: ChangeEntry): HTMLElement {
+	const { diff } = change;
 	const card = parent.createEl('details', { cls: 'va-change' });
 	card.open = !diff.truncated && diff.added + diff.removed <= OPEN_BELOW;
 
 	const summary = card.createEl('summary');
 	setIcon(
 		summary.createSpan({ cls: 'va-change-icon' }),
-		change.kind === 'create' ? 'file-plus' : 'file-pen',
+		change.change === 'create' ? 'file-plus' : 'file-pen',
 	);
 	setChangeLabel(app, summary.createSpan({ cls: 'va-change-path' }), change);
 	renderCounts(summary, diff);
@@ -257,16 +321,19 @@ export function addFileChange(app: App, parent: HTMLElement, change: FileChange)
  * The same diff, for a write that hasn't happened yet: what the approval card
  * is actually asking you to allow.
  */
-export function addDiffPreview(parent: HTMLElement, before: string, after: string): HTMLElement {
-	const diff = diffLines(before, after);
+export function addDiffPreview(
+	parent: HTMLElement,
+	diff: SerializedDiff,
+	creating: boolean,
+): HTMLElement {
 	const card = parent.createEl('details', { cls: 'va-change va-change-preview' });
 	card.open = !diff.truncated && diff.added + diff.removed <= OPEN_BELOW;
 
 	const summary = card.createEl('summary');
-	setIcon(summary.createSpan({ cls: 'va-change-icon' }), before ? 'file-pen' : 'file-plus');
+	setIcon(summary.createSpan({ cls: 'va-change-icon' }), creating ? 'file-plus' : 'file-pen');
 	summary.createSpan({
 		cls: 'va-change-path',
-		text: before ? 'What it would change' : 'What it would write',
+		text: creating ? 'What it would write' : 'What it would change',
 	});
 	renderCounts(summary, diff);
 	renderDiffBody(card, diff);
@@ -278,7 +345,7 @@ export function addDiffPreview(parent: HTMLElement, before: string, after: strin
  * yes to becomes the record of what happened — rather than drawing the same
  * diff twice.
  */
-export function markPreviewApplied(app: App, card: HTMLElement, change: FileChange): void {
+export function markPreviewApplied(app: App, card: HTMLElement, change: ChangeEntry): void {
 	const label = card.querySelector('.va-change-path');
 	if (label instanceof HTMLElement) setChangeLabel(app, label, change);
 	card.removeClass('va-change-preview');

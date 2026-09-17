@@ -1,4 +1,5 @@
-import { makeFenceTracker } from '../wikilinks';
+import { TranscriptEntry } from '../types';
+import { parseTranscript } from '../transcript';
 
 /** One embeddable piece of a note: where it came from and its text. */
 export interface Chunk {
@@ -68,50 +69,35 @@ export function chunkMarkdown(path: string, text: string): Chunk[] {
 }
 
 /**
- * A filtered view of a saved conversation transcript, safe to embed as
- * memory: the user's turns plus the agent's FINAL answer per turn. Tool-call
- * lines and intermediate assistant messages are dropped — that is scratch
- * work (and where wrong pre-correction statements live), not memory.
+ * A filtered view of a saved conversation transcript, safe to embed as memory:
+ * the user's turns plus the agent's FINAL answer per turn.
  *
- * Relies on the transcript shape written by conversation.ts:
- * "## 🧑 You" / "## 🤖 Assistant" sections and "> 🔧 `tool(...)`" lines.
+ * The filtering is structural rather than textual, because the transcript
+ * parser already knows what every part of a conversation is. So tool calls and
+ * their output, write diffs, approvals and errors are dropped by never being
+ * assistant prose; the model's reasoning is dropped because it is its own field
+ * and not part of the answer; and a note the [[link]] expander attached is
+ * dropped because the record keeps it apart from what was typed — it is a copy
+ * of a note already indexed under its own path, and embedding it here would
+ * return the same passage twice under two names.
+ *
+ * Intermediate assistant turns go too: that is scratch work on the way to an
+ * answer, and where a wrong statement lives until it is corrected.
  */
 export function chunkConversation(path: string, text: string): Chunk[] {
-	interface Turn {
-		role: 'user' | 'assistant';
-		lines: string[];
-	}
-	const turns: Turn[] = [];
-	let current: Turn | null = null;
+	const entries = parseTranscript(text);
 
-	// Text the wikilink expander attached to a message is a copy of a note that
-	// is already indexed under its own path, so embedding it here would return
-	// the same passage twice under two names. Skipped whole.
-	const fenced = makeFenceTracker();
-	for (const line of text.split('\n')) {
-		if (fenced(line)) continue;
-		if (/^## 🧑 You\s*$/.test(line)) {
-			current = { role: 'user', lines: [] };
-			turns.push(current);
-		} else if (/^## 🤖 Assistant\s*$/.test(line)) {
-			current = { role: 'assistant', lines: [] };
-			turns.push(current);
-		} else if (current && !line.startsWith('> 🔧')) {
-			// Frontmatter and anything before the first section is skipped.
-			current.lines.push(line);
-		}
-	}
-
-	// Keep user turns; of consecutive assistant turns, keep only the last —
-	// that is the final answer the intermediate steps were building toward.
-	const kept = turns.filter(
-		(t, i) => t.role === 'user' || i === turns.length - 1 || turns[i + 1]?.role === 'user',
+	const said = entries.filter(
+		(e): e is Extract<TranscriptEntry, { kind: 'user' | 'assistant' }> =>
+			(e.kind === 'user' || e.kind === 'assistant') && !!e.text.trim(),
+	);
+	const kept = said.filter(
+		(e, i) => e.kind === 'user' || i === said.length - 1 || said[i + 1]?.kind === 'user',
 	);
 
 	const chunks: Chunk[] = [];
-	for (const t of kept) {
-		const heading = t.role === 'user' ? 'You' : 'Assistant';
-		chunks.push(...wrapSection(path, heading, t.lines.join('\n')));
+	for (const e of kept) {
+		chunks.push(...wrapSection(path, e.kind === 'user' ? 'You' : 'Assistant', e.text));
 	}
 	return chunks;
 }

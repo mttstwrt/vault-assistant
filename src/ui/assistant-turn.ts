@@ -115,6 +115,16 @@ export class AssistantTurn {
 		return !!(this.content.trim() || this.reasoning.trim());
 	}
 
+	/** What this turn was, for the record the transcript keeps. */
+	record(): { text: string; reasoning?: string; thoughtMs?: number } {
+		const think = this.think;
+		return {
+			text: this.content,
+			reasoning: this.reasoning || undefined,
+			thoughtMs: think ? (think.endedAt || Date.now()) - think.startedAt : undefined,
+		};
+	}
+
 	/** Stop the elapsed-time ticker (the view is closing mid-stream). */
 	dispose(): void {
 		this.stopTicker();

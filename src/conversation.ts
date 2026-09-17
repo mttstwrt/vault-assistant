@@ -1,8 +1,8 @@
 import { App, TFile, TFolder, moment, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
-import { ChatMessage } from './types';
+import { ChatMessage, TranscriptEntry } from './types';
+import { parseTranscript, renderTranscript, toMessages } from './transcript';
 import { ensureFolder } from './tools/files';
-import { makeFenceTracker } from './wikilinks';
 
 /** Sanitise a title or first message into a short filename-safe slug. */
 export function conversationSlug(label: string): string {
@@ -67,77 +67,30 @@ export function newConversationPath(
 	return path;
 }
 
-/** Render messages (no frontmatter) as readable markdown lines. */
-export function renderMessages(messages: ChatMessage[]): string[] {
-	const lines: string[] = [];
-	for (const m of messages) {
-		if (m.role === 'user') {
-			lines.push('## 🧑 You', '', m.content, '');
-		} else if (m.role === 'assistant') {
-			if (m.content) lines.push('## 🤖 Assistant', '', m.content, '');
-			for (const call of m.toolCalls ?? []) {
-				lines.push(`> 🔧 \`${call.name}(${call.arguments})\``, '');
-			}
-		}
-		// `tool` result messages are intentionally omitted to keep transcripts clean.
-	}
-	return lines;
-}
-
-/** Render the transcript as readable markdown. */
-function renderConversation(messages: ChatMessage[]): string {
-	const lines: string[] = [
+/** Render the transcript as a readable note. */
+function renderConversation(entries: TranscriptEntry[]): string {
+	return [
 		'---',
 		`created: ${moment().format('YYYY-MM-DD HH:mm')}`,
 		'tags: [ai-conversation]',
 		'---',
 		'',
-		...renderMessages(messages),
-	];
-	return lines.join('\n');
+		...renderTranscript(entries),
+	].join('\n');
+}
+
+/** Read a saved transcript back into the record the panel shows. */
+export function openTranscript(md: string): TranscriptEntry[] {
+	return parseTranscript(md);
 }
 
 /**
- * Parse a saved transcript back into user/assistant messages so a previous
- * conversation can be reopened. Tool-call records (`> 🔧 …`) are dropped —
- * they aren't replayable without their results.
+ * A saved transcript as messages, for readers that only want what was said —
+ * the semantic indexer, and anything else that treats a conversation as text
+ * rather than as a session to resume.
  */
 export function parseConversation(md: string): ChatMessage[] {
-	let body = md;
-	if (body.startsWith('---\n')) {
-		const end = body.indexOf('\n---\n', 4);
-		if (end !== -1) body = body.slice(end + 5);
-	}
-
-	const messages: ChatMessage[] = [];
-	let role: 'user' | 'assistant' | null = null;
-	let buf: string[] = [];
-	const flush = (): void => {
-		if (!role) return;
-		const content = buf.join('\n').trim();
-		if (content) messages.push({ role, content });
-		buf = [];
-	};
-
-	// A note attached by the wikilink expander can itself be a saved
-	// conversation, whose own section headings would otherwise split one turn
-	// into several here. Inside a fence, nothing is a marker.
-	const fenced = makeFenceTracker();
-	for (const line of body.split('\n')) {
-		if (fenced(line)) {
-			buf.push(line);
-		} else if (line.startsWith('## 🧑 You')) {
-			flush();
-			role = 'user';
-		} else if (line.startsWith('## 🤖 Assistant')) {
-			flush();
-			role = 'assistant';
-		} else if (!line.startsWith('> 🔧 `')) {
-			buf.push(line);
-		}
-	}
-	flush();
-	return messages;
+	return toMessages(parseTranscript(md));
 }
 
 /** Write (or overwrite) the conversation transcript at `path`. */
@@ -145,12 +98,12 @@ export async function saveConversation(
 	app: App,
 	settings: VaultAssistantSettings,
 	path: string,
-	messages: ChatMessage[],
+	entries: TranscriptEntry[],
 ): Promise<void> {
 	const dir = path.split('/').slice(0, -1).join('/');
 	if (dir) await ensureFolder(app, dir);
 
-	const md = renderConversation(messages);
+	const md = renderConversation(entries);
 	const existing = app.vault.getAbstractFileByPath(path);
 	if (existing instanceof TFile) {
 		await app.vault.modify(existing, md);
@@ -167,10 +120,10 @@ export async function saveConversation(
 export async function appendConversation(
 	app: App,
 	path: string,
-	messages: ChatMessage[],
+	entries: TranscriptEntry[],
 ): Promise<void> {
 	const file = app.vault.getAbstractFileByPath(path);
 	if (!(file instanceof TFile)) throw new Error(`Conversation file not found: ${path}`);
-	const md = renderMessages(messages).join('\n');
+	const md = renderTranscript(entries).join('\n');
 	if (md.trim()) await app.vault.append(file, `\n${md}`);
 }

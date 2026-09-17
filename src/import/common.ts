@@ -1,7 +1,8 @@
 import { App, moment, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from '../settings';
 import { ChatMessage } from '../types';
-import { conversationSlug, renderMessages } from '../conversation';
+import { conversationSlug } from '../conversation';
+import { fromMessages, renderTranscript } from '../transcript';
 import { ensureFolder } from '../tools/files';
 
 /**
@@ -60,7 +61,7 @@ export async function writeConversation(
 		`tags: [ai-conversation, ${c.source}]`,
 		'---',
 		'',
-		...renderMessages(c.messages),
+		...renderTranscript(fromMessages(c.messages)),
 	];
 	await ensureFolder(app, dir);
 	await app.vault.create(path, lines.join('\n'));

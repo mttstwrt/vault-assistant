@@ -13,7 +13,7 @@ export type WorkflowOutcome = 'done' | 'paused';
 
 /** What the chat view needs to render a run. */
 export interface WorkflowEvents {
-	onAssistant(content: string): void;
+	onAssistant(content: string, reasoning?: string): void;
 	onToolCall(call: ToolCall): void;
 	onToolResult(call: ToolCall, result: string): void;
 	onError(message: string): void;
@@ -252,7 +252,7 @@ export class WorkflowRun {
 			new Set(), // …nor session MCP approvals
 			history,
 			{
-				onAssistant: (c) => this.events.onAssistant(c),
+				onAssistant: (c, reasoning) => this.events.onAssistant(c, reasoning),
 				onToolCall: (c) => this.events.onToolCall(c),
 				onToolResult: (c, r) => this.events.onToolResult(c, r),
 				onError: (m) => this.events.onError(m),

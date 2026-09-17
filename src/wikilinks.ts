@@ -16,16 +16,12 @@
 import { App, TFile } from 'obsidian';
 import { VaultAssistantSettings } from './settings';
 import { isReadable } from './permissions';
+import { inlinedFence } from './inlined';
 import { sectionRange, splitSubpath } from './tools/sections';
 
 /** Per-link and per-message ceilings on how much text may be attached. */
 const MAX_PER_LINK = 4000;
 const MAX_TOTAL = 12000;
-
-/** Fence delimiters. Plain lines rather than a callout, which would need a
- *  "> " on every line and would mangle any code block inside the note. */
-const FENCE_START = '--- inlined from ';
-const FENCE_END = '--- end inlined ---';
 
 export interface Inlined {
 	/** The link as typed, e.g. "Notes/Ideas#Chunking". */
@@ -130,12 +126,6 @@ function nearest(app: App, settings: VaultAssistantSettings, linkpath: string): 
 	return best ? best.path : null;
 }
 
-/** One attached note, fenced and attributed. */
-function fence(link: string, label: string, body: string, truncated: boolean): string {
-	const note = truncated ? ', truncated — read_file for the rest' : '';
-	return `${FENCE_START}[[${link}]] (${label}, ${body.length} chars${note}) ---\n${body}\n${FENCE_END}`;
-}
-
 /**
  * Resolve the links in `message` and build the text to attach to it.
  *
@@ -194,7 +184,7 @@ export async function expandWikilinks(
 
 		budget -= body.length;
 		const label = subpath ? (subpath.startsWith('#^') ? 'block' : 'heading section') : 'whole note';
-		parts.push(fence(`${file.path}${subpath}`, label, body, body.length < whole.length));
+		parts.push(inlinedFence(`${file.path}${subpath}`, label, body, body.length < whole.length));
 		result.inlined.push({ link, path: file.path, label, chars: body.length });
 	}
 
@@ -204,29 +194,4 @@ export async function expandWikilinks(
 		: '';
 	result.block = parts.length ? `\n\n${parts.join('\n\n')}${tail}` : tail.trimStart();
 	return result;
-}
-
-/**
- * Track whether a transcript line sits inside an inlined fence.
- *
- * Both the transcript parser and the conversation chunker need this: an
- * attached note may itself be a saved conversation, whose "## 🧑 You" headings
- * would otherwise split one turn into several on reopen, and its text is a copy
- * of a note that is already indexed, so embedding it would return the same
- * passage twice. Fixing the readers rather than escaping the content — the
- * model should see the note exactly as it is written.
- */
-export function makeFenceTracker(): (line: string) => boolean {
-	let inside = false;
-	return (line: string): boolean => {
-		if (!inside && line.startsWith(FENCE_START)) {
-			inside = true;
-			return true;
-		}
-		if (inside && line.startsWith(FENCE_END)) {
-			inside = false;
-			return true;
-		}
-		return inside;
-	};
 }
