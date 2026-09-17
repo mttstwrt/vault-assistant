@@ -102,21 +102,43 @@ export function addCopyButton(parent: HTMLElement, getText: () => string): HTMLB
 	return btn;
 }
 
-/** A message bubble with its role label and copy button. */
+/** An action offered on one message, beside its copy button. */
+export interface MessageAction {
+	icon: string;
+	label: string;
+	run: () => void;
+}
+
+/** Draw a message's action buttons into its head row. */
+export function addActions(head: HTMLElement, actions: MessageAction[]): void {
+	for (const action of actions) {
+		const btn = head.createEl('button', { cls: 'va-copy', attr: { 'aria-label': action.label } });
+		setIcon(btn, action.icon);
+		btn.onclick = action.run;
+	}
+}
+
+/** A message bubble with its role label, actions and copy button. */
 function createBubble(
 	parent: HTMLElement,
 	role: 'user' | 'assistant',
 	getText: () => string,
+	actions: MessageAction[] = [],
 ): { bubble: HTMLElement; content: HTMLElement } {
 	const bubble = parent.createDiv({ cls: `va-msg va-${role}` });
 	const head = bubble.createDiv({ cls: 'va-msg-head' });
 	head.createDiv({ cls: 'va-role', text: role === 'user' ? 'You' : 'Assistant' });
+	addActions(head, actions);
 	addCopyButton(head, getText);
 	return { bubble, content: bubble.createDiv({ cls: 'va-content' }) };
 }
 
-export function addUserBubble(parent: HTMLElement, text: string): HTMLElement {
-	const { bubble, content } = createBubble(parent, 'user', () => text);
+export function addUserBubble(
+	parent: HTMLElement,
+	text: string,
+	actions: MessageAction[] = [],
+): HTMLElement {
+	const { bubble, content } = createBubble(parent, 'user', () => text, actions);
 	content.setText(text);
 	return bubble;
 }
@@ -184,8 +206,9 @@ export async function addAssistantTurn(
 	component: Component,
 	parent: HTMLElement,
 	entry: AssistantEntry,
+	actions: MessageAction[] = [],
 ): Promise<HTMLElement> {
-	const { bubble, content } = createBubble(parent, 'assistant', () => entry.text);
+	const { bubble, content } = createBubble(parent, 'assistant', () => entry.text, actions);
 	if (entry.reasoning) {
 		const think = bubble.createEl('details', { cls: 'va-think' });
 		const summary = think.createEl('summary');

@@ -149,6 +149,8 @@ export class ChatView extends ItemView {
 	private mounted = false;
 	/** A transcript setState asked for before the panel existed. */
 	private pendingPath: string | null = null;
+	/** The transcript this one was forked from, linked on its first save. */
+	private branchedFrom: string | null = null;
 	/** A write the user just approved, whose preview becomes the record of it. */
 	private approvedWrite: { path: string; after: string; card: HTMLElement } | null = null;
 	/**
@@ -210,10 +212,7 @@ export class ChatView extends ItemView {
 			attr: { 'aria-label': 'Open previous conversation' },
 		});
 		setIcon(openBtn, 'history');
-		openBtn.onclick = () =>
-			new ConversationPicker(this.app, this.plugin.settings.conversationsFolder, (f) =>
-				void this.openConversation(f),
-			).open();
+		openBtn.onclick = () => this.openPreviousConversation();
 
 		const importBtn = header.createEl('button', {
 			cls: 'va-header-btn',
@@ -344,6 +343,18 @@ export class ChatView extends ItemView {
 	/** True while a message or workflow run is in flight. */
 	isBusy(): boolean {
 		return this.busy;
+	}
+
+	/** Start a fresh conversation (the header's + button, and its command). */
+	newConversation(): void {
+		void this.resetConversation();
+	}
+
+	/** Open the conversation picker (the header's history button, and its command). */
+	openPreviousConversation(): void {
+		new ConversationPicker(this.app, this.plugin.settings.conversationsFolder, (f) =>
+			void this.openConversation(f),
+		).open();
 	}
 
 	/**
@@ -533,6 +544,7 @@ export class ChatView extends ItemView {
 		this.systemPrompt = await buildSystemPrompt(this.app, this.plugin.settings);
 		this.entries = [];
 		this.conversationPath = null;
+		this.branchedFrom = null;
 		this.persistedCount = 0;
 		this.lastStats = null;
 		this.toolEls.clear();
@@ -578,15 +590,30 @@ export class ChatView extends ItemView {
 	 */
 	private async renderEntries(entries: TranscriptEntry[]): Promise<void> {
 		for (const entry of entries) {
+			// The index is captured per entry, so a button still means the turn it
+			// was drawn on after the record is rebuilt around it.
+			const at = entries.indexOf(entry);
 			switch (entry.kind) {
 				case 'user': {
-					const bubble = addUserBubble(this.messagesEl, entry.text);
+					const bubble = addUserBubble(this.messagesEl, entry.text, [
+						{
+							icon: 'pencil',
+							label: 'Edit this message and continue from here',
+							run: () => void this.editFrom(at),
+						},
+					]);
 					if (entry.attached) addExpansionNote(this.app, bubble, entry.attached);
 					break;
 				}
 				case 'assistant': {
 					if (!entry.text.trim() && !entry.reasoning) break;
-					await addAssistantTurn(this.app, this, this.messagesEl, entry);
+					await addAssistantTurn(this.app, this, this.messagesEl, entry, [
+						{
+							icon: 'refresh-cw',
+							label: 'Answer again',
+							run: () => void this.regenerate(at),
+						},
+					]);
 					break;
 				}
 				case 'tool': {
@@ -605,6 +632,84 @@ export class ChatView extends ItemView {
 					break;
 			}
 		}
+	}
+
+	/**
+	 * Drop everything from `index` on, and decide where what remains belongs.
+	 *
+	 * Discarding recorded turns from a conversation that has a note would
+	 * rewrite somebody's file to say something other than what happened, so it
+	 * forks instead: the kept turns become a new transcript that links back to
+	 * its parent, and the vault's own link graph holds the branch. Two
+	 * exceptions keep that from being noise — a conversation with no note yet
+	 * has nothing to preserve, and regenerating the final answer replaces an
+	 * answer you just rejected rather than discarding a turn you might want.
+	 */
+	private async rewindTo(index: number, fork: boolean): Promise<void> {
+		this.cancelPendingApprovals();
+		const parent = this.conversationPath;
+		this.entries = this.entries.slice(0, index);
+
+		if (fork && parent) {
+			this.branchedFrom = parent;
+			this.conversationPath = null;
+		}
+		// Either way the file no longer matches the record, so the next save
+		// writes it whole rather than appending to a tail that has moved.
+		this.persistedCount = 0;
+
+		this.toolEls.clear();
+		this.messagesEl.empty();
+		this.followOutput = true;
+		this.ring.reset();
+		if (this.branchedFrom) {
+			const line = addInfo(this.messagesEl, 'Branched from ');
+			createPathLink(this.app, line, this.branchedFrom);
+		}
+		await this.renderEntries(this.entries);
+		this.scrollToBottom(true);
+	}
+
+	/** The text of the newest user message, which is what a retry re-answers. */
+	private lastUserText(): string {
+		for (let i = this.entries.length - 1; i >= 0; i--) {
+			const e = this.entries[i];
+			if (e?.kind === 'user') return e.text;
+		}
+		return '';
+	}
+
+	/** Answer the standing question again, in place of the answer at `index`. */
+	private async regenerate(index: number): Promise<void> {
+		if (this.busy || this.saving) {
+			this.busyNotice();
+			return;
+		}
+		// Only the last answer is a retry; an earlier one discards what followed.
+		const isLast = !this.entries.slice(index + 1).some((e) => e.kind === 'assistant');
+		await this.rewindTo(index, !isLast);
+		const text = this.lastUserText();
+		if (!text) return;
+		const abort = new AbortController();
+		this.abort = abort;
+		this.setBusy(true);
+		this.setStatus('Thinking…');
+		await this.runTurn(text, abort);
+	}
+
+	/** Lift a message and everything after it back into the composer to redo. */
+	private async editFrom(index: number): Promise<void> {
+		if (this.busy || this.saving) {
+			this.busyNotice();
+			return;
+		}
+		const entry = this.entries[index];
+		if (entry?.kind !== 'user') return;
+		const text = entry.text;
+		await this.rewindTo(index, true);
+		this.inputEl.value = text;
+		fitToContent(this.inputEl);
+		this.inputEl.focus();
 	}
 
 	/**
@@ -743,8 +848,11 @@ export class ChatView extends ItemView {
 			reasoning: reasoning || undefined,
 			stats: toTurnStats(this.lastStats ?? undefined),
 		};
+		const at = this.entries.length;
 		this.record(entry);
-		await addAssistantTurn(this.app, this, this.messagesEl, entry);
+		await addAssistantTurn(this.app, this, this.messagesEl, entry, [
+			{ icon: 'refresh-cw', label: 'Answer again', run: () => void this.regenerate(at) },
+		]);
 		this.scrollToBottom();
 	}
 
@@ -864,7 +972,14 @@ export class ChatView extends ItemView {
 
 		this.inputEl.value = '';
 		fitToContent(this.inputEl);
-		const bubble = addUserBubble(this.messagesEl, text);
+		const at = this.entries.length;
+		const bubble = addUserBubble(this.messagesEl, text, [
+			{
+				icon: 'pencil',
+				label: 'Edit this message and continue from here',
+				run: () => void this.editFrom(at),
+			},
+		]);
 		this.scrollToBottom(true);
 
 		// Busy before the first await, not after: expanding links reads notes,
@@ -890,6 +1005,18 @@ export class ChatView extends ItemView {
 		}
 		this.record({ kind: 'user', text, block: expansion?.block || undefined, attached });
 
+		await this.runTurn(text, abort);
+	}
+
+	/**
+	 * Run the agent over the record as it stands and fold the result back in.
+	 *
+	 * Split from send() because a regenerated answer runs exactly this and adds
+	 * no message: the question is already in the record, and asking it again
+	 * must not enter it twice. `userText` is the message being answered — what
+	 * the pre-pass expands into searches, and what names the conversation.
+	 */
+	private async runTurn(userText: string, abort: AbortController): Promise<void> {
 		// Both blocks are rebuilt from scratch each turn, so stale tabs and last
 		// turn's pre-fetched context never pile up. Order matters: the strippers
 		// cut from their marker to the end.
@@ -897,7 +1024,7 @@ export class ChatView extends ItemView {
 		system += buildOpenFilesBlock(this.app, this.plugin.settings);
 		if (this.plugin.settings.usePrePass && !abort.signal.aborted) {
 			this.setStatus('Preparing context…');
-			const block = await prepareContext(this.app, this.plugin.settings, this.plugin.rag, text);
+			const block = await prepareContext(this.app, this.plugin.settings, this.plugin.rag, userText);
 			if (block) system += block;
 			this.setStatus('Thinking…');
 		}
@@ -944,9 +1071,17 @@ export class ChatView extends ItemView {
 					stream: {
 						onStart: () => {
 							this.setStatus('Generating…');
+							const at = this.entries.length;
 							this.turn = new AssistantTurn(this.app, this, this.messagesEl, {
 								expandThinking: this.plugin.settings.expandThinking,
 								onGrow: () => this.scrollToBottom(),
+								actions: [
+									{
+										icon: 'refresh-cw',
+										label: 'Answer again',
+										run: () => void this.regenerate(at),
+									},
+								],
 							});
 						},
 						onContent: (delta) => this.turn?.pushContent(delta),
@@ -1030,7 +1165,7 @@ export class ChatView extends ItemView {
 				// file is preserved as saved.
 				await appendConversation(this.app, path, this.entries.slice(this.persistedCount));
 			} else {
-				await saveConversation(this.app, this.plugin.settings, path, this.entries);
+				await saveConversation(this.app, this.plugin.settings, path, this.entries, this.branchedFrom);
 			}
 			this.persistedCount = this.entries.length;
 			return path;

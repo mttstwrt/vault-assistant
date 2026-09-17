@@ -5,13 +5,15 @@
  */
 import { App, Component, MarkdownRenderer, setIcon } from 'obsidian';
 import { CallStats } from '../api/client';
-import { addCopyButton, addStats } from './message-render';
+import { MessageAction, addActions, addCopyButton, addStats } from './message-render';
 
 export interface TurnOptions {
 	/** Keep the thinking section open while the model reasons. */
 	expandThinking: boolean;
 	/** Called whenever the turn grows, so the panel can follow along. */
 	onGrow: () => void;
+	/** Offered beside the copy button, as on any other message. */
+	actions?: MessageAction[];
 }
 
 /** The live thinking section, created the first time reasoning arrives. */
@@ -135,6 +137,7 @@ export class AssistantTurn {
 			this.bubble = this.parent.createDiv({ cls: 'va-msg va-assistant' });
 			const head = this.bubble.createDiv({ cls: 'va-msg-head' });
 			head.createDiv({ cls: 'va-role', text: 'Assistant' });
+			addActions(head, this.opts.actions ?? []);
 			addCopyButton(head, () => this.content);
 		}
 		return this.bubble;

@@ -67,11 +67,19 @@ export function newConversationPath(
 	return path;
 }
 
-/** Render the transcript as a readable note. */
-function renderConversation(entries: TranscriptEntry[]): string {
+/**
+ * Render the transcript as a readable note.
+ *
+ * `branchedFrom` is the transcript this one was forked from, written as a
+ * [[link]] rather than a path: that gives the parent a backlink, so the fork
+ * shows up in Obsidian's graph and in the `links` tool without either note
+ * having to be told about the other twice.
+ */
+function renderConversation(entries: TranscriptEntry[], branchedFrom: string | null): string {
 	return [
 		'---',
 		`created: ${moment().format('YYYY-MM-DD HH:mm')}`,
+		...(branchedFrom ? [`branched-from: "[[${branchedFrom}]]"`] : []),
 		'tags: [ai-conversation]',
 		'---',
 		'',
@@ -99,11 +107,12 @@ export async function saveConversation(
 	settings: VaultAssistantSettings,
 	path: string,
 	entries: TranscriptEntry[],
+	branchedFrom: string | null = null,
 ): Promise<void> {
 	const dir = path.split('/').slice(0, -1).join('/');
 	if (dir) await ensureFolder(app, dir);
 
-	const md = renderConversation(entries);
+	const md = renderConversation(entries, branchedFrom);
 	const existing = app.vault.getAbstractFileByPath(path);
 	if (existing instanceof TFile) {
 		await app.vault.modify(existing, md);

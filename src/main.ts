@@ -80,6 +80,20 @@ export default class VaultAssistantPlugin extends Plugin {
 			},
 		});
 
+		// The header offers these too; as commands they can take a hotkey, which
+		// is how llama.cpp's UI and every editor reach the same two actions.
+		this.addCommand({
+			id: 'new-chat',
+			name: 'New chat',
+			callback: () => void this.withChat((view) => view.newConversation()),
+		});
+
+		this.addCommand({
+			id: 'open-conversation',
+			name: 'Open a previous conversation',
+			callback: () => void this.withChat((view) => view.openPreviousConversation()),
+		});
+
 		this.addCommand({
 			id: 'start-research',
 			name: 'Run workflow',
@@ -252,11 +266,16 @@ export default class VaultAssistantPlugin extends Plugin {
 		await this.mcp.connectAll(this.app, this.settings);
 	}
 
-	/** Open the chat panel and the workflow modal. */
-	async openWorkflow(): Promise<void> {
+	/** Reveal the chat panel, opening it first if it is not there, and act on it. */
+	private async withChat(act: (view: ChatView) => void): Promise<void> {
 		await this.activateView();
 		const view = this.app.workspace.getLeavesOfType(VIEW_TYPE_CHAT)[0]?.view;
-		if (view instanceof ChatView) view.openWorkflowModal();
+		if (view instanceof ChatView) act(view);
+	}
+
+	/** Open the chat panel and the workflow modal. */
+	async openWorkflow(): Promise<void> {
+		await this.withChat((view) => view.openWorkflowModal());
 	}
 
 	/**
