@@ -126,6 +126,9 @@ export async function runAgent(
 						stream.onReasoning(d);
 					},
 					onReclassify: () => stream.onReclassify(),
+					// The panel's gauge would otherwise sit still through the
+					// longest part of a turn and jump at the end of it.
+					onProgress: (s) => events.onStats?.(s),
 				},
 				opts.signal,
 			);

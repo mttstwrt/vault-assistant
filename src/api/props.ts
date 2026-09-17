@@ -23,6 +23,22 @@ interface ServerProps {
 const cache = new Map<string, Promise<number | null>>();
 
 /**
+ * Endpoints that answered /props with a real context size.
+ *
+ * Only llama.cpp serves this endpoint, so an answer is a reliable fingerprint —
+ * and the one thing worth doing with it is asking for the extras llama.cpp
+ * alone understands. Everything else must keep seeing a plain OpenAI request:
+ * hosted APIs reject body fields they do not know, so a parameter the user did
+ * not ask for is never sent speculatively.
+ */
+const llamaCpp = new Set<string>();
+
+/** Whether this endpoint has identified itself as llama.cpp by answering /props. */
+export function servesLlamaCppProps(baseUrl: string, model: string): boolean {
+	return llamaCpp.has(propsUrl(baseUrl, model));
+}
+
+/**
  * The /props URL for one model. Two llama.cpp details shape it:
  *
  * - /props sits at the server root, beside /v1, not inside it.
@@ -76,7 +92,9 @@ export function serverContextSize(
 			if (res.status >= 400) return null;
 			const props = JSON.parse(res.text) as ServerProps;
 			const n = props?.default_generation_settings?.n_ctx;
-			return typeof n === 'number' && n > 0 ? n : null;
+			if (typeof n !== 'number' || n <= 0) return null;
+			llamaCpp.add(url);
+			return n;
 		})
 		.catch((e: unknown) => {
 			console.debug('[vault-assistant] No context size from', url, describeRequestError(e, url));
@@ -90,4 +108,5 @@ export function serverContextSize(
 /** Forget what an endpoint said, so a model or endpoint swap is picked up. */
 export function clearPropsCache(): void {
 	cache.clear();
+	llamaCpp.clear();
 }

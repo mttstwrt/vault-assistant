@@ -114,6 +114,13 @@ export function chatRequestBody(
 	tools: ToolSpec[],
 	overrides: CallOverrides,
 	stream: boolean,
+	/**
+	 * Ask llama.cpp to report timings on every streamed chunk instead of only
+	 * the last, so the panel's gauge moves while the answer is being written
+	 * rather than once it has been. Only ever set for an endpoint that has
+	 * identified itself as llama.cpp: hosted APIs reject unknown body fields.
+	 */
+	liveTimings = false,
 ): Record<string, unknown> {
 	const body: Record<string, unknown> = {
 		temperature: settings.temperature,
@@ -139,6 +146,7 @@ export function chatRequestBody(
 		body.tool_choice = 'auto';
 	}
 	if (stream) body.stream = true;
+	if (stream && liveTimings) body.timings_per_token = true;
 	return body;
 }
 

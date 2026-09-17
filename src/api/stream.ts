@@ -17,11 +17,13 @@ import {
 	ApiTimings,
 	ApiUsage,
 	CallOverrides,
+	CallStats,
 	LLMResult,
 	chatEndpoint,
 	chatRequestBody,
 	toStats,
 } from './request';
+import { servesLlamaCppProps } from './props';
 
 /** A `tool_calls` entry inside a streamed delta; fields arrive piecemeal. */
 interface DeltaToolCall {
@@ -47,6 +49,12 @@ interface StreamChunk {
 export interface StreamHandlers {
 	onContent(delta: string): void;
 	onReasoning(delta: string): void;
+	/**
+	 * Fresh numbers mid-answer, when the endpoint volunteers them per chunk.
+	 * llama.cpp does, given `timings_per_token`; nothing else reports anything
+	 * until the turn ends, so this simply never fires there.
+	 */
+	onProgress?(stats: CallStats): void;
 	/**
 	 * Everything reported as content so far was actually reasoning — a closing
 	 * `</think>` arrived without an opener. See {@link ThinkTagSplitter}.
@@ -77,7 +85,10 @@ export async function streamChatCompletion(
 	signal?: AbortSignal,
 ): Promise<LLMResult> {
 	const { url, headers } = chatEndpoint(settings);
-	const body = JSON.stringify(chatRequestBody(settings, messages, tools, overrides, true));
+	const live = servesLlamaCppProps(settings.baseUrl, overrides.model ?? settings.model);
+	const body = JSON.stringify(
+		chatRequestBody(settings, messages, tools, overrides, true, live),
+	);
 	const requestHeaders = { ...headers, Accept: 'text/event-stream' };
 	const startedAt = Date.now();
 
@@ -114,7 +125,10 @@ export async function streamChatCompletion(
 
 	const handleChunk = (chunk: StreamChunk): void => {
 		if (chunk.usage) usage = chunk.usage;
-		if (chunk.timings) timings = chunk.timings;
+		if (chunk.timings) {
+			timings = chunk.timings;
+			handlers.onProgress?.(toStats(usage, timings, Date.now() - startedAt));
+		}
 		const delta = chunk.choices?.[0]?.delta;
 		if (!delta) return;
 

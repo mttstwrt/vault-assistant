@@ -933,6 +933,12 @@ export class ChatView extends ItemView {
 						this.lastStats = stats;
 						this.ring.report(stats);
 						this.retryContextTotal();
+						// While a turn is still streaming these arrive per chunk
+						// (llama.cpp only), so the speed is worth showing as it is
+						// measured rather than once the answer has stopped.
+						if (this.turn && stats.tokensPerSecond) {
+							this.setStatus(`Generating… ${stats.tokensPerSecond.toFixed(1)} tok/s`);
+						}
 					},
 					requestApproval: (req) => this.requestApproval(req),
 					stream: {
