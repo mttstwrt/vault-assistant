@@ -1,8 +1,7 @@
 import { App, TFile, debounce, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from '../settings';
-import { isReadable } from '../permissions';
+import { inFolder, isReadable } from '../permissions';
 import { embed } from '../api/client';
-import { inFolder } from '../tools/graph';
 import { Chunk, chunkConversation, chunkMarkdown } from './chunk';
 import { RagStore, hashText } from './store';
 

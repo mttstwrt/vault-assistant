@@ -12,8 +12,7 @@
  */
 import { App, TFile } from 'obsidian';
 import { VaultAssistantSettings } from '../settings';
-import { isReadable } from '../permissions';
-import { inFolder } from './graph';
+import { inFolder, isReadable } from '../permissions';
 
 /** Longest pattern accepted, as a crude bound on catastrophic backtracking. */
 const MAX_PATTERN = 200;

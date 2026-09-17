@@ -1,11 +1,6 @@
 import { FuzzySuggestModal, Notice, Plugin, TFile, WorkspaceLeaf, normalizePath } from 'obsidian';
-import {
-	VaultAssistantSettings,
-	VaultAssistantSettingTab,
-	DEFAULT_SETTINGS,
-	DEFAULT_SYSTEM_PROMPT,
-	LEGACY_SYSTEM_PROMPTS,
-} from './settings';
+import { VaultAssistantSettings, VaultAssistantSettingTab, DEFAULT_SETTINGS } from './settings';
+import { DEFAULT_SYSTEM_PROMPT, LEGACY_SYSTEM_PROMPTS } from './system-prompt';
 import { ChatView, VIEW_TYPE_CHAT } from './ui/chat-view';
 import { ImportModal } from './ui/import-modal';
 import { McpManager } from './mcp/manager';
@@ -14,6 +9,7 @@ import { WorkflowDef, loadWorkflows } from './workflows/schema';
 import { WORKFLOW_PRESETS, presetToNote } from './workflows/presets';
 import { WorkflowRun, createRunNote, expandPlaceholders } from './workflows/runner';
 import { workflowToCanvas } from './workflows/canvas';
+import { AgentDeps } from './agent';
 
 /**
  * Samplers used to be numbers that were always saved and, for temperature,
@@ -185,11 +181,7 @@ export default class VaultAssistantPlugin extends Plugin {
 
 		new Notice(`Vault assistant: scheduled "${workflow.name}" starting.`);
 		this.scheduledRun = new WorkflowRun(
-			this.app,
-			s,
-			() => this.saveSettings(),
-			this.mcp,
-			this.rag,
+			this.agentDeps(),
 			workflow,
 			{ path, maxRounds: 1, delaySeconds: 0 },
 			{
@@ -235,6 +227,17 @@ export default class VaultAssistantPlugin extends Plugin {
 			})
 			.sort((a, b) => b.stat.mtime - a.stat.mtime)[0];
 		return candidate?.path ?? null;
+	}
+
+	/** What anything running the agent borrows from the plugin. */
+	agentDeps(): AgentDeps {
+		return {
+			app: this.app,
+			settings: this.settings,
+			saveSettings: () => this.saveSettings(),
+			mcp: this.mcp,
+			rag: this.rag,
+		};
 	}
 
 	/** Rebuild the semantic index, reporting progress and outcome as notices. */

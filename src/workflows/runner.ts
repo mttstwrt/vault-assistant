@@ -1,12 +1,10 @@
 import { App, TFile, moment, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from '../settings';
 import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall } from '../types';
-import { ExtraTool, runAgent } from '../agent';
+import { AgentDeps, ExtraTool, runAgent } from '../agent';
 import { buildSystemPrompt } from '../prompts';
 import { conversationSlug } from '../conversation';
 import { ensureFolder } from '../tools/files';
-import { McpManager } from '../mcp/manager';
-import { RagIndexer } from '../rag/indexer';
 import { WorkflowDef, WorkflowStep } from './schema';
 
 export type WorkflowOutcome = 'done' | 'paused';
@@ -97,16 +95,18 @@ export class WorkflowRun {
 	private stopRequested = false;
 	private finishSummary: string | null = null;
 
+	private readonly app: App;
+	private readonly settings: VaultAssistantSettings;
+
 	constructor(
-		private app: App,
-		private settings: VaultAssistantSettings,
-		private saveSettings: () => Promise<void>,
-		private mcp: McpManager,
-		private rag: RagIndexer,
+		private deps: AgentDeps,
 		private workflow: WorkflowDef,
 		private opts: WorkflowRunOptions,
 		private events: WorkflowEvents,
-	) {}
+	) {
+		this.app = deps.app;
+		this.settings = deps.settings;
+	}
 
 	/** Request a stop; takes effect at the next model-call boundary. */
 	stop(): void {
@@ -243,13 +243,9 @@ export class WorkflowRun {
 		const toolSet = step.tools ? new Set(step.tools) : null;
 
 		await runAgent(
-			this.app,
-			this.settings,
-			this.saveSettings,
-			this.mcp,
-			this.rag,
-			new Set(), // runs never persist session write approvals across steps
-			new Set(), // …nor session MCP approvals
+			this.deps,
+			// A run never carries session approvals from one step into the next.
+			{ writes: new Set(), mcp: new Set() },
 			history,
 			{
 				onAssistant: (c, reasoning) => this.events.onAssistant(c, reasoning),

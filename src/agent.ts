@@ -1,11 +1,10 @@
-import { App } from 'obsidian';
-import { VaultAssistantSettings } from './settings';
 import { ApprovalRequest, ApprovalResult, ChatMessage, FileChange, ToolCall, ToolSpec } from './types';
 import { CallOverrides, CallStats, LLMResult, chatCompletion } from './api/client';
 import { streamChatCompletion } from './api/stream';
-import { ToolContext, activeToolSpecs, executeTool } from './tools/vault-tools';
-import { McpManager } from './mcp/manager';
-import { RagIndexer } from './rag/indexer';
+import { AgentDeps, SessionGrants, ToolContext, executeTool } from './tools/vault-tools';
+import { activeToolSpecs } from './tools/specs';
+
+export type { AgentDeps, SessionGrants } from './tools/vault-tools';
 
 /** How a streamed turn is reported to the UI while it is being generated. */
 export interface StreamEvents {
@@ -72,25 +71,16 @@ export interface AgentOptions {
  * and returns `history`.
  */
 export async function runAgent(
-	app: App,
-	settings: VaultAssistantSettings,
-	saveSettings: () => Promise<void>,
-	mcp: McpManager,
-	rag: RagIndexer,
-	sessionWrites: Set<string>,
-	sessionMcp: Set<string>,
+	deps: AgentDeps,
+	grants: SessionGrants,
 	history: ChatMessage[],
 	events: AgentEvents,
 	opts: AgentOptions = {},
 ): Promise<ChatMessage[]> {
+	const { settings } = deps;
 	const ctx: ToolContext = {
-		app,
-		settings,
-		saveSettings,
-		sessionWrites,
-		sessionMcp,
-		mcp,
-		rag,
+		...deps,
+		grants,
 		requestApproval: events.requestApproval,
 		onFileChange: events.onFileChange,
 	};
@@ -99,7 +89,7 @@ export async function runAgent(
 	const tools = [
 		...activeToolSpecs(settings).filter((t) => allow(t.name)),
 		...[...extraTools.values()].map((t) => t.spec),
-		...mcp.toolSpecs().filter((t) => allow(t.name)),
+		...deps.mcp.toolSpecs().filter((t) => allow(t.name)),
 	];
 	/** What this request was actually offered, for redirecting stray tool calls. */
 	const offered = new Set(tools.map((t) => t.name));

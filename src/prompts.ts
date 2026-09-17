@@ -3,7 +3,7 @@ import { VaultAssistantSettings } from './settings';
 import { displayScopes, writeScopes } from './permissions';
 import { buildMemorySection } from './memory';
 import { buildWikiSection } from './wiki';
-import { activeToolSpecs } from './tools/vault-tools';
+import { activeToolSpecs } from './tools/specs';
 
 /**
  * Build the full system prompt: the user's base instructions, a live

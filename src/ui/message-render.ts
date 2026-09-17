@@ -9,8 +9,8 @@ import {
 	ToolCall,
 	TranscriptEntry,
 } from '../types';
-import { describeDecision } from '../transcript';
-import { DiffSegment, wordDiff } from './diff';
+import { describeDecision, serializeDiff } from '../transcript';
+import { DiffSegment, diffLines, wordDiff } from './diff';
 
 /**
  * A vault path as an Obsidian internal link.
@@ -226,6 +226,91 @@ export async function addAssistantTurn(
 	if (entry.text) await MarkdownRenderer.render(app, entry.text, content, '', component);
 	addStats(bubble, { stats: entry.stats, aborted: entry.aborted === true });
 	return bubble;
+}
+
+/**
+ * Draw the card that asks whether an out-of-scope action may happen.
+ *
+ * Rendering only: the caller owns what a decision means and whether it is still
+ * wanted, and answers through `settle`. The returned `preview` is the diff
+ * shown for a pending write, which becomes the record of that write once it is
+ * allowed rather than being drawn a second time.
+ */
+export function addApprovalCard(
+	app: App,
+	parent: HTMLElement,
+	req: ApprovalRequest,
+	settle: (result: ApprovalResult, label: string, card: HTMLElement) => void,
+): { card: HTMLElement; preview: HTMLElement | null } {
+	let preview: HTMLElement | null = null;
+
+	const card = parent.createDiv({ cls: 'va-approval' });
+	const head = card.createDiv({ cls: 'va-approval-head' });
+	setIcon(head.createSpan({ cls: 'va-approval-icon' }), 'shield-alert');
+	head.createSpan({ text: req.kind === 'mcp' ? ' External tool call' : ' Approval required' });
+
+	if (req.kind === 'move' || req.kind === 'create-folder') {
+		card.createDiv({
+			cls: 'va-approval-body',
+			text:
+				req.kind === 'move'
+					? `The agent wants to move something outside your allowed folders (via ${req.tool}):`
+					: `The agent wants to create a folder outside your allowed folders (via ${req.tool}):`,
+		});
+		const line = card.createEl('code', { cls: 'va-approval-path' });
+		createPathLink(app, line, req.path ?? '');
+		if (req.kind === 'move') {
+			line.appendText('  →  ');
+			createPathLink(app, line, req.toPath ?? '');
+		}
+	} else if (req.kind === 'mcp') {
+		card.createDiv({
+			cls: 'va-approval-body',
+			text: `The agent wants to call an external MCP tool on "${req.serverName}":`,
+		});
+		card.createEl('code', { cls: 'va-approval-path', text: req.tool });
+		if (req.args && req.args !== '{}') {
+			card.createEl('pre', { cls: 'va-approval-args', text: prettyJson(req.args) });
+		}
+	} else {
+		card.createDiv({
+			cls: 'va-approval-body',
+			text: `The agent wants to write outside your allowed folders (via ${req.tool}):`,
+		});
+		createPathLink(app, card.createEl('code', { cls: 'va-approval-path' }), req.path ?? '');
+		// Decide on the actual change, not just the path.
+		if (req.preview) {
+			preview = addDiffPreview(
+				card,
+				serializeDiff(diffLines(req.preview.before, req.preview.after)),
+				!req.preview.before,
+			);
+		}
+	}
+
+	const row = card.createDiv({ cls: 'va-approval-actions' });
+	const answer = (label: string, result: ApprovalResult, cls: string): void => {
+		const b = row.createEl('button', { cls: `va-approval-btn ${cls}`, text: label });
+		b.onclick = () => {
+			row.empty();
+			card.addClass('va-approval-done');
+			card.createDiv({ cls: 'va-approval-choice', text: `→ ${label}` });
+			settle(result, label, card);
+		};
+	};
+
+	answer('Deny', 'deny', 'va-deny');
+	answer('Allow once', 'once', 'va-once');
+	answer('Allow for session', 'session', 'va-session');
+	if (req.kind === 'mcp') {
+		answer(`Always trust ${req.serverName}`, 'always-trust', 'va-always');
+	} else {
+		// "This file" means nothing when the thing being made IS a folder.
+		if (req.kind !== 'create-folder') answer('Always: this file', 'always-file', 'va-always');
+		if (req.folder) answer(`Always: ${req.folder}/`, 'always-folder', 'va-always');
+	}
+
+	return { card, preview };
 }
 
 /**

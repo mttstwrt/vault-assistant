@@ -1,14 +1,6 @@
 import { App, TFile, normalizePath } from 'obsidian';
 import { VaultAssistantSettings } from '../settings';
-import { isReadable } from '../permissions';
-
-/** True when `path` sits inside (or equals) `folder`. */
-export function inFolder(path: string, folder: string): boolean {
-	const f = normalizePath(folder).replace(/^\/+|\/+$/g, '');
-	const p = normalizePath(path);
-	if (!f) return true;
-	return p === f || p.startsWith(f + '/');
-}
+import { inFolder, isReadable } from '../permissions';
 
 /** Invert the metadata cache into a target → sources backlink map. */
 export function buildBacklinks(app: App): Record<string, string[]> {

@@ -46,8 +46,8 @@ import { AssistantTurn } from './assistant-turn';
 import { fitToContent } from './autogrow';
 import { ContextRing } from './context-ring';
 import {
+	addApprovalCard,
 	addApprovalRecord,
-	addDiffPreview,
 	addError,
 	addFileChange,
 	addInfo,
@@ -55,7 +55,6 @@ import {
 	addToolResult,
 	addUserBubble,
 	markPreviewApplied,
-	prettyJson,
 	addExpansionNote,
 	addAssistantTurn,
 	createPathLink,
@@ -732,89 +731,28 @@ export class ChatView extends ItemView {
 		this.approvedWrite = null;
 	}
 
-	/** Render an approval card and resolve when the user picks an option. */
+	/**
+	 * Ask the user about an out-of-scope action and wait for the answer.
+	 *
+	 * The card is drawn in ./message-render; what is owned here is everything a
+	 * drawing cannot decide — whether the prompt is still live (a new
+	 * conversation cancels it), that an allowed write reuses the diff already on
+	 * screen instead of drawing it twice, and that the decision joins the record.
+	 */
 	private requestApproval(req: ApprovalRequest): Promise<ApprovalResult> {
 		return new Promise<ApprovalResult>((resolve) => {
 			this.pendingApprovals.add(resolve);
-			/** The diff shown for a pending write, relabelled once it is applied. */
-			let preview: HTMLElement | null = null;
-
-			const card = this.messagesEl.createDiv({ cls: 'va-approval' });
-			const head = card.createDiv({ cls: 'va-approval-head' });
-			setIcon(head.createSpan({ cls: 'va-approval-icon' }), 'shield-alert');
-			head.createSpan({ text: req.kind === 'mcp' ? ' External tool call' : ' Approval required' });
-			if (req.kind === 'move' || req.kind === 'create-folder') {
-				card.createDiv({
-					cls: 'va-approval-body',
-					text:
-						req.kind === 'move'
-							? `The agent wants to move something outside your allowed folders (via ${req.tool}):`
-							: `The agent wants to create a folder outside your allowed folders (via ${req.tool}):`,
-				});
-				const line = card.createEl('code', { cls: 'va-approval-path' });
-				createPathLink(this.app, line, req.path ?? '');
-				if (req.kind === 'move') {
-					line.appendText('  →  ');
-					createPathLink(this.app, line, req.toPath ?? '');
-				}
-			} else if (req.kind === 'mcp') {
-				card.createDiv({
-					cls: 'va-approval-body',
-					text: `The agent wants to call an external MCP tool on "${req.serverName}":`,
-				});
-				card.createEl('code', { cls: 'va-approval-path', text: req.tool });
-				if (req.args && req.args !== '{}') {
-					card.createEl('pre', { cls: 'va-approval-args', text: prettyJson(req.args) });
-				}
-			} else {
-				card.createDiv({
-					cls: 'va-approval-body',
-					text: `The agent wants to write outside your allowed folders (via ${req.tool}):`,
-				});
-				createPathLink(this.app, card.createEl('code', { cls: 'va-approval-path' }), req.path ?? '');
-				// Decide on the actual change, not just the path.
-				if (req.preview) {
-					preview = addDiffPreview(
-						card,
-						serializeDiff(diffLines(req.preview.before, req.preview.after)),
-						!req.preview.before,
-					);
-				}
-			}
-
-			const row = card.createDiv({ cls: 'va-approval-actions' });
-			const settle = (result: ApprovalResult, label: string): void => {
+			const { preview } = addApprovalCard(this.app, this.messagesEl, req, (result) => {
 				if (!this.pendingApprovals.has(resolve)) return;
 				this.pendingApprovals.delete(resolve);
 				// An allowed write happens next; its diff is already on screen.
 				if (preview && req.preview && result !== 'deny') {
 					this.approvedWrite = { path: req.path ?? '', after: req.preview.after, card: preview };
 				}
-				row.empty();
-				card.addClass('va-approval-done');
-				card.createDiv({ cls: 'va-approval-choice', text: `→ ${label}` });
-				// What you allowed is part of what happened, so it is recorded
-				// rather than living only on the card that asked.
 				this.record({ kind: 'approval', request: req, decision: result });
 				this.scrollToBottom();
 				resolve(result);
-			};
-			const addBtn = (label: string, result: ApprovalResult, cls: string): void => {
-				const b = row.createEl('button', { cls: `va-approval-btn ${cls}`, text: label });
-				b.onclick = () => settle(result, label);
-			};
-
-			addBtn('Deny', 'deny', 'va-deny');
-			addBtn('Allow once', 'once', 'va-once');
-			addBtn('Allow for session', 'session', 'va-session');
-			if (req.kind === 'mcp') {
-				addBtn(`Always trust ${req.serverName}`, 'always-trust', 'va-always');
-			} else {
-				// "This file" means nothing when the thing being made IS a folder.
-				if (req.kind !== 'create-folder') addBtn('Always: this file', 'always-file', 'va-always');
-				if (req.folder) addBtn(`Always: ${req.folder}/`, 'always-folder', 'va-always');
-			}
-
+			});
 			// An approval needs an answer, so always bring it into view.
 			this.scrollToBottom(true);
 		});
@@ -1042,13 +980,8 @@ export class ChatView extends ItemView {
 
 		if (!abort.signal.aborted) {
 			await runAgent(
-				this.app,
-				this.plugin.settings,
-				() => this.plugin.saveSettings(),
-				this.plugin.mcp,
-				this.plugin.rag,
-				this.sessionWrites,
-				this.sessionMcp,
+				this.plugin.agentDeps(),
+				{ writes: this.sessionWrites, mcp: this.sessionMcp },
 				history,
 				{
 					onAssistant: (c, reasoning) => void this.addAssistantBubble(c, reasoning),
@@ -1245,11 +1178,7 @@ export class ChatView extends ItemView {
 		this.setBusy(true, 'run');
 		this.setStatus('Workflow run in progress…');
 		this.workflowRun = new WorkflowRun(
-			this.app,
-			this.plugin.settings,
-			() => this.plugin.saveSettings(),
-			this.plugin.mcp,
-			this.plugin.rag,
+			this.plugin.agentDeps(),
 			start.workflow,
 			{ path, maxRounds: start.maxRounds, delaySeconds: start.delaySeconds },
 			{
