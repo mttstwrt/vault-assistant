@@ -168,6 +168,16 @@ Bringing it back needs an endpoint that actually advertises the levels a model a
 
 ## Development
 
+How the plugin works inside, and why it works that way, is in
+**[docs/](docs/README.md)** — the component map and the two data flows in
+[architecture.md](docs/architecture.md), then a page each for
+[the agent](docs/agent/README.md) (the loop, the tool surface, the permission
+model every tool must honour), [retrieval](docs/retrieval/README.md) (the wiki,
+the semantic index, the pre-pass, typed links), and
+[the endpoint](docs/api/README.md) (what a server has to provide and what
+degrades when it does not). [docs/future-work.md](docs/future-work.md) records
+what was deliberately left out, with the argument.
+
 ```bash
 npm install
 npm run dev      # watch build

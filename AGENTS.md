@@ -263,6 +263,8 @@ this.registerInterval(
 
 ## References
 
+- **This project's internals: [docs/README.md](docs/README.md)** — read
+  `docs/architecture.md` before changing anything that crosses a subsystem.
 - Obsidian sample plugin: https://github.com/obsidianmd/obsidian-sample-plugin
 - API documentation: https://docs.obsidian.md
 - Developer policies: https://docs.obsidian.md/Developer+policies

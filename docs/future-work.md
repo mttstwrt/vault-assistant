@@ -164,6 +164,26 @@ list.
   note using an anchor Obsidian already defines. Patch application needs its own
   ambiguity handling and its own failure modes.
 
+## Decisions carried over from shipped plans
+
+Two plans have been folded into the permanent docs and deleted. What they
+settled, which still binds:
+
+- **No workflow engine.** `agent.ts` is about a hundred lines and enough; a
+  graph library is a heavy dependency against a plugin that has none and must
+  stay mobile-safe. A declarative schema plus a small runner covers the need.
+- **No visual workflow editor.** The picker previews steps and *View workflow as
+  canvas* exports a read-only `.canvas`. Parsing a canvas back *as* a workflow
+  definition is the editor direction and remains optional.
+- **No external vector database, no native modules, no embeddings library.**
+  Brute-force cosine in JavaScript over a personal-scale vault — hundreds to low
+  thousands of notes — is fast enough and keeps the bundle mobile-safe.
+- **No standalone MCP server.** Integration is in-process only; this plugin is a
+  client, not a host other clients connect to.
+- **Token-level dynamic temperature is not buildable client-side.** Sampling
+  happens server-side, per request. What is possible is passing the parameters
+  through, which is what the extra-params escape hatch is for.
+
 ---
 
-Repository README: [../README.md](../README.md)
+Repository README: [../README.md](../README.md) · Docs index: [README.md](README.md)
