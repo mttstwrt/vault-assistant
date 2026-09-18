@@ -16,6 +16,13 @@ export interface StreamEvents {
 	onReclassify(): void;
 	/** The turn ended, was interrupted, or failed. */
 	onDone(info: { stats?: CallStats; aborted: boolean }): void;
+	/**
+	 * Streaming was asked for and could not be opened, so this turn — and every
+	 * turn after it — arrives in one piece instead. Worth saying out loud: the
+	 * user turned streaming on, and the fallback makes it look as though the
+	 * model sat silent and then answered instantly.
+	 */
+	onUnavailable(reason: string): void;
 }
 
 export interface AgentEvents {
@@ -127,7 +134,9 @@ export async function runAgent(
 			// support streaming from here (CORS, a proxy) — try the buffered path
 			// once, then let any error surface normally.
 			if (arrived || opts.signal?.aborted) throw e;
+			const why = e instanceof Error ? e.message : String(e);
 			console.warn('[vault-assistant] Streaming failed; retrying without it:', e);
+			stream.onUnavailable(why);
 			const res = await chatCompletion(settings, history, tools, opts.overrides ?? {});
 			if (res.reasoning) stream.onReasoning(res.reasoning);
 			if (res.content) stream.onContent(res.content);

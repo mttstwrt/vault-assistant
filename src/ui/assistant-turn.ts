@@ -29,6 +29,18 @@ interface ThinkBlock {
 }
 
 export class AssistantTurn {
+	/**
+	 * When this turn began, which is when the model started producing it.
+	 *
+	 * The thinking clock is measured from here rather than from the moment the
+	 * thinking section happens to be created, because those are not the same
+	 * instant and the difference is the whole duration. A model whose template
+	 * prefills `<think>` — llama.cpp does this for reasoning models — emits its
+	 * reasoning as ordinary content until the closing tag arrives, so the
+	 * section is built *after* the thinking has finished; measured from its own
+	 * creation it would always read "Thought for 0.0s".
+	 */
+	private readonly startedAt = Date.now();
 	private bubble: HTMLElement | null = null;
 	private contentEl: HTMLElement | null = null;
 	private contentText: Text | null = null;
@@ -172,7 +184,9 @@ export class AssistantTurn {
 			details,
 			label,
 			text,
-			startedAt: Date.now(),
+			// Reasoning that precedes any answer text began when the turn did;
+			// reasoning that follows some began just now.
+			startedAt: this.content ? Date.now() : this.startedAt,
 			endedAt: 0,
 			userToggled: false,
 		};

@@ -148,6 +148,8 @@ export class ChatView extends ItemView {
 	private mounted = false;
 	/** A transcript setState asked for before the panel existed. */
 	private pendingPath: string | null = null;
+	/** Said once per conversation, not once per turn (see onUnavailable). */
+	private warnedNoStreaming = false;
 	/** The transcript this one was forked from, linked on its first save. */
 	private branchedFrom: string | null = null;
 	/** A write the user just approved, whose preview becomes the record of it. */
@@ -544,6 +546,7 @@ export class ChatView extends ItemView {
 		this.entries = [];
 		this.conversationPath = null;
 		this.branchedFrom = null;
+		this.warnedNoStreaming = false;
 		this.persistedCount = 0;
 		this.lastStats = null;
 		this.toolEls.clear();
@@ -955,6 +958,16 @@ export class ChatView extends ItemView {
 	 * the pre-pass expands into searches, and what names the conversation.
 	 */
 	private async runTurn(userText: string, abort: AbortController): Promise<void> {
+		try {
+			await this.generate(userText, abort);
+		} catch (e) {
+			this.addError(e instanceof Error ? e.message : String(e));
+			this.finishTurn();
+		}
+	}
+
+	/** One turn, from rebuilding the prompt to saving what came back. */
+	private async generate(userText: string, abort: AbortController): Promise<void> {
 		// Both blocks are rebuilt from scratch each turn, so stale tabs and last
 		// turn's pre-fetched context never pile up. Order matters: the strippers
 		// cut from their marker to the end.
@@ -1017,6 +1030,19 @@ export class ChatView extends ItemView {
 								],
 							});
 						},
+						onUnavailable: (reason) => {
+							// The setting says answers stream; they are not. Without
+							// this the only symptom is a long silence and then a
+							// whole answer at once — which reads as the panel being
+							// broken rather than as a fallback doing its job.
+							if (this.warnedNoStreaming) return;
+							this.warnedNoStreaming = true;
+							addInfo(
+								this.messagesEl,
+								`This endpoint would not stream, so answers arrive whole: ${reason}`,
+							);
+							this.scrollToBottom();
+						},
 						onContent: (delta) => this.turn?.pushContent(delta),
 						onReasoning: (delta) => this.turn?.pushReasoning(delta),
 						onReclassify: () => this.turn?.reclassifyAsReasoning(),
@@ -1045,16 +1071,33 @@ export class ChatView extends ItemView {
 		if (abort.signal.aborted && !stopShown) addInfo(this.messagesEl, 'Stopped.');
 		this.lastStats = null;
 
-		// A conversation that already has a file keeps it current, whatever
-		// auto-save says: the setting decides whether a transcript is created
-		// without being asked, not whether one that exists stays true. Saving
-		// here, before the panel unblocks, keeps the naming call inside the
-		// busy window so a new message cannot arrive mid-decision.
-		if (this.plugin.settings.autoSaveConversations || this.conversationPath) {
-			await this.persistConversation(abort.signal.aborted);
+		try {
+			// A conversation that already has a file keeps it current, whatever
+			// auto-save says: the setting decides whether a transcript is created
+			// without being asked, not whether one that exists stays true. Saving
+			// here, before the panel unblocks, keeps the naming call inside the
+			// busy window so a new message cannot arrive mid-decision.
+			if (this.plugin.settings.autoSaveConversations || this.conversationPath) {
+				await this.persistConversation(abort.signal.aborted);
+			}
+		} finally {
+			this.finishTurn();
 		}
+	}
 
+	/**
+	 * Hand the panel back to the user.
+	 *
+	 * In a `finally`, and called from one at every exit: a throw anywhere in a
+	 * turn used to leave Send reading "Stop" and the status strip reading
+	 * "Generating…" for the rest of the session, with nothing left generating
+	 * and no way to send another message. Unblocking has to be the one thing a
+	 * turn cannot fail to do.
+	 */
+	private finishTurn(): void {
 		this.abort = null;
+		this.turn?.dispose();
+		this.turn = null;
 		this.setStatus(null);
 		this.setBusy(false);
 	}
